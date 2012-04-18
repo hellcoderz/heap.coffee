@@ -370,10 +370,10 @@ exports.TypeAssign = class TypeAssign extends Base
 
   children: ['name', 'type']
 
-exports.Declare = class Declare extends Base
-  constructor: (@variable, @value) ->
+exports.DeclareType = class DeclareType extends Base
+  constructor: (@variable, @type) ->
 
-  children: ['variable', 'value']
+  children: ['variable', 'type']
 
 exports.Ref = class Ref extends Base
   constructor: (@expr) ->

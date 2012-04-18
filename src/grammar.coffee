@@ -171,8 +171,8 @@ grammar =
   ]
 
   DeclareType: [
-    o 'Identifier IS_TYPE Type',                -> new Declare $1, $3
-    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new Declare $1, $3
+    o 'Identifier IS_TYPE Type',                -> new DeclareType $1, $3
+    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new DeclareType $1, $3
   ]
 
   TypeAssign: [
