@@ -135,21 +135,16 @@ grammar =
       val
   ]
 
-  Struct: [
-    o 'STRUCT { StructAssignList OptComma }',   -> new StructType $2
+  StructFieldList: [
+    o 'StructField',                                                      -> [$1]
+    o 'StructFieldList , StructField',                                    -> $1.concat $3
+    o 'StructFieldList OptComma TERMINATOR StructField',                  -> $1.concat $4
+    o 'StructFieldList OptComma INDENT StructFieldList OptComma OUTDENT', -> $1.concat $4
   ]
 
-  StructAssignList: [
-    o '',                                                                   -> []
-    o 'AssignStruct',                                                       -> [$1]
-    o 'StructAssignList , AssignStruct',                                    -> $1.concat $3
-    o 'StructAssignList OptComma TERMINATOR AssignStruct',                  -> $1.concat $4
-    o 'StructAssignList OptComma INDENT StructAssignList OptComma OUTDENT', -> $1.concat $4
-  ]
-
-  AssignStruct: [
-    o 'Identifier IS_TYPE Type',                -> new TypedIdentifier $1, $3
-    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new TypedIdentifier $1, $4
+  StructField: [
+    o 'Identifier IS_TYPE BaseType',                -> new StructField new Value($1), $3
+    o 'Identifier IS_TYPE INDENT BaseType OUTDENT', -> new StructField new Value($1), $4
     o 'Comment'
   ]
 
@@ -166,10 +161,13 @@ grammar =
     o 'BaseTypeList OptComma INDENT BaseTypeList OptComma OUTDENT', -> $1.concat $4
   ]
 
-  # Arrow types are _not_ higher-order!
+  # This is not a full type system. Arrow types and struct types are not
+  # higher-order and can only contain base types.
   Type: [
     o 'BaseType'
     o 'PARAM_START BaseTypeList PARAM_END -> INDENT BaseType OUTDENT', -> new ArrowType $2, $6
+    o 'STRUCT { StructFieldList OptComma }',                           -> new StructType $3
+    o 'STRUCT INDENT StructFieldList OptComma OUTDENT',                -> new StructType $3
   ]
 
   DeclareType: [

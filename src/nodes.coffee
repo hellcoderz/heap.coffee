@@ -360,6 +360,11 @@ exports.StructType = class StructType extends Base
 
   children: ['fields']
 
+exports.StructField = class StructField extends Base
+  constructor: (@name, @type) ->
+
+  children: ['name', 'type']
+
 exports.TypeAssign = class TypeAssign extends Base
   constructor: (@name, @type) ->
 
