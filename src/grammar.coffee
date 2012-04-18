@@ -292,7 +292,6 @@ grammar =
   # or by array index or slice.
   Accessor: [
     o '.  Identifier',                          -> new Access $2
-    o '~> Identifier',                          -> new Access $2, 'ref'
     o '?. Identifier',                          -> new Access $2, 'soak'
     o ':: Identifier',                          -> [(new Access new Literal 'prototype'), new Access $2]
     o '::',                                     -> new Access new Literal 'prototype'
