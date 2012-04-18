@@ -57,8 +57,28 @@ grammar =
   # all parsing must end here.
   Root: [
     o '',                                       -> new Block
-    o 'Body'
-    o 'Block TERMINATOR'
+    o 'RootBody'
+    o 'RootBlock TERMINATOR'
+  ]
+
+  # Special top-level body
+  RootBody: [
+    o 'RootLine',                               -> Block.wrap [$1]
+    o 'RootBody TERMINATOR RootLine',           -> $1.push $3
+    o 'RootBody TERMINATOR'
+  ]
+
+  # Special top-level block
+  RootBlock: [
+    o 'INDENT OUTDENT',                         -> new Block
+    o 'INDENT RootBody OUTDENT',                -> $2
+  ]
+
+  # Lines at the root can contain type synonyms
+  RootLine: [
+    o 'TypeAssign'
+    o 'Expression'
+    o 'Statement'
   ]
 
   # Any list of statements and expressions, separated by line breaks or semicolons.
@@ -90,7 +110,6 @@ grammar =
     o 'Invocation'
     o 'Code'
     o 'DeclareType'
-    o 'TypeAssign'
     o 'Operation'
     o 'Assign'
     o 'If'
