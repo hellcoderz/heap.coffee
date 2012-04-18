@@ -22,6 +22,7 @@ class exports.Rewriter
     @removeMidExpressionNewlines()
     @closeOpenCalls()
     @closeOpenIndexes()
+    @disambiguateTypeDeclarations()
     @addImplicitIndentation()
     @tagPostfixConditionals()
     @addImplicitBraces()
@@ -94,6 +95,14 @@ class exports.Rewriter
 
     @scanTokens (token, i) ->
       @detectEnd i + 1, condition, action if token[0] is 'INDEX_START'
+      1
+
+  # Disambiguate type declarations and prototype accesses.
+  disambiguateTypeDeclarations: ->
+
+    @scanTokens (token, i, tokens) ->
+      return 1 unless token[0] is '::' and (token.spaced or token.newLine) and tokens[i-1]?.spaced
+      token[0] = 'IS_TYPE'
       1
 
   # Object literals may be written with implicit braces, for simple cases.

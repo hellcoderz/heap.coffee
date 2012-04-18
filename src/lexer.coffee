@@ -557,7 +557,10 @@ JS_KEYWORDS = [
 ]
 
 # CoffeeScript-only keywords.
-COFFEE_KEYWORDS = ['undefined', 'then', 'unless', 'until', 'loop', 'of', 'by', 'when']
+COFFEE_KEYWORDS = [
+  'undefined', 'then', 'unless', 'until', 'loop', 'of', 'by', 'when',
+  'ref', 'struct', 'type', 'as'
+]
 
 COFFEE_ALIAS_MAP =
   and  : '&&'
@@ -609,7 +612,7 @@ NUMBER     = ///
 HEREDOC    = /// ^ ("""|''') ([\s\S]*?) (?:\n[^\n\S]*)? \1 ///
 
 OPERATOR   = /// ^ (
-  ?: [-=]>             # function
+  ?: [-=~]>            # function or pointer arrow
    | [-+*/%<>&|^!?=]=  # compound assign / compare
    | >>>=?             # zero-fill right shift
    | ([-+:])\1         # doubles
@@ -669,7 +672,7 @@ COMPOUND_ASSIGN = [
 UNARY   = ['!', '~', 'NEW', 'TYPEOF', 'DELETE', 'DO']
 
 # Logical tokens.
-LOGIC   = ['&&', '||', '&', '|', '^']
+LOGIC   = ['&&', '||', '|', '^']
 
 # Bit-shifting tokens.
 SHIFT   = ['<<', '>>', '>>>']
@@ -678,7 +681,7 @@ SHIFT   = ['<<', '>>', '>>>']
 COMPARE = ['==', '!=', '<', '>', '<=', '>=']
 
 # Mathematical tokens.
-MATH    = ['*', '/', '%']
+MATH    = ['/', '%']
 
 # Relational tokens that are negatable with `not` prefix.
 RELATION = ['IN', 'OF', 'INSTANCEOF']

@@ -338,6 +338,53 @@ exports.Literal = class Literal extends Base
   toString: ->
     ' "' + @value + '"'
 
+#### Types
+
+exports.BaseType = class Type extends Base
+  constructor: (@name) ->
+
+  children: ['name']
+
+exports.RefType = class RefType extends Base
+  constructor: (@type) ->
+
+  children: ['type']
+
+exports.ArrowType = class ArrowType extends Base
+  constructor: (@arguments, @return) ->
+
+  children: ['arguments', 'return']
+
+exports.StructType = class StructType extends Base
+  constructor: (@fields) ->
+
+  children: ['fields']
+
+exports.TypeAssign = class TypeAssign extends Base
+  constructor: (@name, @type) ->
+
+  children: ['name', 'type']
+
+exports.Declare = class Declare extends Base
+  constructor: (@variable, @value) ->
+
+  children: ['variable', 'value']
+
+exports.Ref = class Ref extends Base
+  constructor: (@expr) ->
+
+  children: ['expr']
+
+exports.Deref = class Deref extends Base
+  constructor: (@expr) ->
+
+  children: ['expr']
+
+exports.Cast = class Cast extends Base
+  constructor: (@expr, @type) ->
+
+  children: ['expr', 'type']
+
 #### Return
 
 # A `return` is a *pureStatement* -- wrapping it in a closure wouldn't
@@ -1117,7 +1164,7 @@ exports.Assign = class Assign extends Base
   compileConditional: (o) ->
     [left, right] = @variable.cacheReference o
     # Disallow conditional assignment of undefined variables.
-    if not left.properties.length and left.base instanceof Literal and 
+    if not left.properties.length and left.base instanceof Literal and
            left.base.value != "this" and not o.scope.check left.base.value
       throw new Error "the variable \"#{left.base.value}\" can't be assigned with #{@context} because it has not been defined."
     if "?" in @context then o.isExistentialEquals = true

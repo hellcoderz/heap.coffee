@@ -89,6 +89,8 @@ grammar =
     o 'Value'
     o 'Invocation'
     o 'Code'
+    o 'DeclareType'
+    o 'TypeAssign'
     o 'Operation'
     o 'Assign'
     o 'If'
@@ -131,6 +133,53 @@ grammar =
       val = new Literal $1
       val.isUndefined = yes if $1 is 'undefined'
       val
+  ]
+
+  Struct: [
+    o 'STRUCT { StructAssignList OptComma }',   -> new StructType $2
+  ]
+
+  StructAssignList: [
+    o '',                                                                   -> []
+    o 'AssignStruct',                                                       -> [$1]
+    o 'StructAssignList , AssignStruct',                                    -> $1.concat $3
+    o 'StructAssignList OptComma TERMINATOR AssignStruct',                  -> $1.concat $4
+    o 'StructAssignList OptComma INDENT StructAssignList OptComma OUTDENT', -> $1.concat $4
+  ]
+
+  AssignStruct: [
+    o 'Identifier IS_TYPE Type',                -> new TypedIdentifier $1, $3
+    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new TypedIdentifier $1, $4
+    o 'Comment'
+  ]
+
+  BaseType: [
+    o 'Identifier',                             -> new BaseType $1
+    o 'BaseType REF',                           -> new RefType $1
+  ]
+
+  BaseTypeList: [
+    o '',                                                           -> []
+    o 'BaseType',                                                   -> [$1]
+    o 'BaseTypeList , BaseType',                                    -> $1.concat $3
+    o 'BaseTypeList OptComma TERMINATOR BaseType',                  -> $1.concat $4
+    o 'BaseTypeList OptComma INDENT BaseTypeList OptComma OUTDENT', -> $1.concat $4
+  ]
+
+  # Arrow types are _not_ higher-order!
+  Type: [
+    o 'BaseType'
+    o 'PARAM_START BaseTypeList PARAM_END -> INDENT BaseType OUTDENT', -> new ArrowType $2, $6
+  ]
+
+  DeclareType: [
+    o 'Identifier IS_TYPE Type',                -> new Declare new Value($1), $3
+    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new Declare new Value($1), $3
+  ]
+
+  TypeAssign: [
+    o 'TYPE Identifier = Type',                 -> new TypeAssign new Value($2), $4
+    o 'TYPE Identifier = INDENT Type OUTDENT',  -> new TypeAssign new Value($2), $4
   ]
 
   # Assignment of a variable, property, or index to a value.
@@ -245,6 +294,7 @@ grammar =
   # or by array index or slice.
   Accessor: [
     o '.  Identifier',                          -> new Access $2
+    o '~> Identifier',                          -> new Access $2, 'ref'
     o '?. Identifier',                          -> new Access $2, 'soak'
     o ':: Identifier',                          -> [(new Access new Literal 'prototype'), new Access $2]
     o '::',                                     -> new Access new Literal 'prototype'
@@ -511,6 +561,8 @@ grammar =
   # rules are necessary.
   Operation: [
     o 'UNARY Expression',                       -> new Op $1 , $2
+    o '*     Expression',                       -> new Deref $2
+    o '&     Expression',                       -> new Ref $2
     o '-     Expression',                      (-> new Op '-', $2), prec: 'UNARY'
     o '+     Expression',                      (-> new Op '+', $2), prec: 'UNARY'
 
@@ -522,8 +574,13 @@ grammar =
     # [The existential operator](http://jashkenas.github.com/coffee-script/#existence).
     o 'Expression ?',                           -> new Existence $1
 
+    o 'Expression AS Type',                     -> new Cast $1, $3
+
     o 'Expression +  Expression',               -> new Op '+' , $1, $3
     o 'Expression -  Expression',               -> new Op '-' , $1, $3
+
+    o 'Expression *  Expression',               -> new Op '*' , $1, $3
+    o 'Expression &  Expression',               -> new Op '&' , $1, $3
 
     o 'Expression MATH     Expression',         -> new Op $2, $1, $3
     o 'Expression SHIFT    Expression',         -> new Op $2, $1, $3
@@ -560,12 +617,13 @@ operators = [
   ['nonassoc',  '++', '--']
   ['left',      '?']
   ['right',     'UNARY']
-  ['left',      'MATH']
+  ['left',      'AS']
+  ['left',      '*', 'MATH']
   ['left',      '+', '-']
   ['left',      'SHIFT']
   ['left',      'RELATION']
   ['left',      'COMPARE']
-  ['left',      'LOGIC']
+  ['left',      '&', 'LOGIC']
   ['nonassoc',  'INDENT', 'OUTDENT']
   ['right',     '=', ':', 'COMPOUND_ASSIGN', 'RETURN', 'THROW', 'EXTENDS']
   ['right',     'FORIN', 'FOROF', 'BY', 'WHEN']
