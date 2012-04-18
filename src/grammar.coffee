@@ -143,14 +143,14 @@ grammar =
   ]
 
   StructField: [
-    o 'Identifier IS_TYPE BaseType',                -> new StructField new Value($1), $3
-    o 'Identifier IS_TYPE INDENT BaseType OUTDENT', -> new StructField new Value($1), $4
+    o 'Identifier IS_TYPE BaseType',                -> new StructField $1, $3
+    o 'Identifier IS_TYPE INDENT BaseType OUTDENT', -> new StructField $1, $4
     o 'Comment'
   ]
 
   BaseType: [
     o 'Identifier',                             -> new BaseType $1
-    o 'BaseType REF',                           -> new RefType $1
+    o '* BaseType',                             -> new PointerType $2
   ]
 
   BaseTypeList: [
@@ -171,13 +171,13 @@ grammar =
   ]
 
   DeclareType: [
-    o 'Identifier IS_TYPE Type',                -> new Declare new Value($1), $3
-    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new Declare new Value($1), $3
+    o 'Identifier IS_TYPE Type',                -> new Declare $1, $3
+    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new Declare $1, $3
   ]
 
   TypeAssign: [
-    o 'TYPE Identifier = Type',                 -> new TypeAssign new Value($2), $4
-    o 'TYPE Identifier = INDENT Type OUTDENT',  -> new TypeAssign new Value($2), $4
+    o 'TYPE Identifier = Type',                 -> new TypeAssign $2, $4
+    o 'TYPE Identifier = INDENT Type OUTDENT',  -> new TypeAssign $2, $4
   ]
 
   # Assignment of a variable, property, or index to a value.

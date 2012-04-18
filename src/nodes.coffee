@@ -345,7 +345,7 @@ exports.BaseType = class Type extends Base
 
   children: ['name']
 
-exports.RefType = class RefType extends Base
+exports.PointerType = class PointerType extends Base
   constructor: (@type) ->
 
   children: ['type']

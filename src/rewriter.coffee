@@ -22,7 +22,7 @@ class exports.Rewriter
     @removeMidExpressionNewlines()
     @closeOpenCalls()
     @closeOpenIndexes()
-    @disambiguateTypeDeclarations()
+    @disambiguateTypeStuff()
     @addImplicitIndentation()
     @tagPostfixConditionals()
     @addImplicitBraces()
@@ -98,11 +98,12 @@ class exports.Rewriter
       1
 
   # Disambiguate type declarations and prototype accesses.
-  disambiguateTypeDeclarations: ->
+  disambiguateTypeStuff: ->
 
     @scanTokens (token, i, tokens) ->
-      return 1 unless token[0] is '::' and (token.spaced or token.newLine) and tokens[i-1]?.spaced
-      token[0] = 'IS_TYPE'
+      token[0] = 'IS_TYPE' if token[0] is '::' and (token.spaced or token.newLine) and tokens[i-1]?.spaced
+      token[0] = 'TYPE' if token[0] is 'IDENTIFIER' and token[1] is 'type' and
+                           tokens[i+1]?[0] is 'IDENTIFIER' and tokens[i+2]?[0] is '='
       1
 
   # Object literals may be written with implicit braces, for simple cases.
