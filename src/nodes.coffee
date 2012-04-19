@@ -351,9 +351,9 @@ exports.PointerType = class PointerType extends Base
   children: ['type']
 
 exports.ArrowType = class ArrowType extends Base
-  constructor: (@arguments, @return) ->
+  constructor: (@params, @ret) ->
 
-  children: ['arguments', 'return']
+  children: ['params', 'ret']
 
 exports.StructType = class StructType extends Base
   constructor: (@fields) ->
