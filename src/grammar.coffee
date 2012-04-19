@@ -168,7 +168,7 @@ grammar =
   ]
 
   BaseType: [
-    o 'Identifier',                             -> new BaseType $1
+    o 'Identifier',                             -> new TypeName $1
     o '* BaseType',                             -> new PointerType $2
   ]
 

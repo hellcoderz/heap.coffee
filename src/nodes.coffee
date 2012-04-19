@@ -340,7 +340,7 @@ exports.Literal = class Literal extends Base
 
 #### Types
 
-exports.BaseType = class Type extends Base
+exports.TypeName = class TypeName extends Base
   constructor: (@name) ->
 
   children: ['name']
