@@ -312,6 +312,9 @@ exports.Literal = class Literal extends Base
   isAssignable: ->
     IDENTIFIER.test @value
 
+  isSimpleNumber: ->
+    SIMPLENUM.test @value
+
   isStatement: ->
     @value in ['break', 'continue', 'debugger']
 
@@ -345,35 +348,51 @@ exports.TypeName = class TypeName extends Base
 
   children: ['name']
 
-exports.PointerType = class PointerType extends Base
-  constructor: (@type) ->
+  toString: -> '"' + @name.value + '"'
 
-  children: ['type']
+exports.PointerType = class PointerType extends Base
+  constructor: (@base) ->
+
+  children: ['base']
+
+  toString: -> "*#{@base}"
 
 exports.ArrowType = class ArrowType extends Base
   constructor: (@params, @ret) ->
 
   children: ['params', 'ret']
 
+  toString: -> "(#{@params.join(', ')}) -> #{@ret}"
+
 exports.StructType = class StructType extends Base
   constructor: (@fields) ->
 
   children: ['fields']
+
+  toString: -> "struct {#{@fields.join(', ')} }"
 
 exports.StructField = class StructField extends Base
   constructor: (@name, @type) ->
 
   children: ['name', 'type']
 
+  toString: -> "#{@name}: #{@type}"
+
 exports.TypeAssign = class TypeAssign extends Base
   constructor: (@name, @type) ->
 
-  children: ['name', 'type']
+  children: ['type']
+
+  toString: (idt = '') ->
+    '\n' + idt + @constructor.name + @name + '\n' + idt + TAB + @type
 
 exports.DeclareType = class DeclareType extends Base
   constructor: (@variable, @type) ->
 
   children: ['variable', 'type']
+
+  toString: (idt = '') ->
+    '\n' + idt + @constructor.name + @variable + '\n' + idt + TAB + @type
 
 exports.Ref = class Ref extends Base
   constructor: (@expr) ->
@@ -389,6 +408,9 @@ exports.Cast = class Cast extends Base
   constructor: (@expr, @type) ->
 
   children: ['expr', 'type']
+
+  toString: (idt = '') ->
+    '\n' + idt + @constructor.name + @expr + '\n' + idt + TAB + @type
 
 #### Return
 

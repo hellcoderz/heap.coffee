@@ -34,6 +34,7 @@ o = (patternString, action, options) ->
   patternString = patternString.replace /\s{2,}/g, ' '
   return [patternString, '$$ = $1;', options] unless action
   action = if match = unwrap.exec action then match[1] else "(#{action}())"
+  action = action.replace /\binstanceof /g, '$&yy.'
   action = action.replace /\bnew /g, '$&yy.'
   action = action.replace /\b(?:Block\.wrap|extend)\b/g, 'yy.$&'
   [patternString, "$$ = #{action};", options]
