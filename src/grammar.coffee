@@ -163,13 +163,13 @@ grammar =
   ]
 
   StructField: [
-    o 'Identifier IS_TYPE BaseType',                -> new StructField $1, $3
-    o 'Identifier IS_TYPE INDENT BaseType OUTDENT', -> new StructField $1, $4
+    o 'IDENTIFIER IS_TYPE BaseType',                -> new StructField $1, $3
+    o 'IDENTIFIER IS_TYPE INDENT BaseType OUTDENT', -> new StructField $1, $4
     o 'Comment'
   ]
 
   BaseType: [
-    o 'Identifier',                             -> new TypeName $1
+    o 'IDENTIFIER',                             -> new TypeName $1
     o '* BaseType',                             -> new PointerType $2
   ]
 
@@ -196,8 +196,8 @@ grammar =
   ]
 
   TypeAssign: [
-    o 'TYPE Identifier = Type',                 -> new TypeAssign $2, $4
-    o 'TYPE Identifier = INDENT Type OUTDENT',  -> new TypeAssign $2, $4
+    o 'TYPE IDENTIFIER = Type',                 -> new TypeAssign $2, $4
+    o 'TYPE IDENTIFIER = INDENT Type OUTDENT',  -> new TypeAssign $2, $4
   ]
 
   # Assignment of a variable, property, or index to a value.
