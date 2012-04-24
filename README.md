@@ -4,6 +4,10 @@ heap.coffee is a CoffeeScript dialect that has an optional C-like type system
 with manual memory management which compiles to an explicit typed array. This
 lets you write memory-efficient and GC pause-free code less painfully.
 
+A word of warning: this is not a very good type system, or even does very
+much. It's basically a glorified preprocessor to help compute offsets for
+field structs.
+
 ### Original CoffeeScript
 
 ```coffeescript
@@ -155,5 +159,5 @@ n = new node
 
 i :: int
 i = n         # error: incompatible types `int' and `*node'
-i = {}        # error: cannot assign untyped to type
+i = {}        # error: cannot assign untyped to typed
 ```
