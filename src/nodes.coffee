@@ -39,7 +39,8 @@ exports.Base = class Base
   compile: (o, lvl) ->
     o        = extend {}, o
     o.level  = lvl if lvl
-    node     = @unfoldSoak(o) or this
+    node0    = @transform?(o) or this
+    node     = node0.unfoldSoak(o) or node0
     node.tab = o.indent
     if o.level is LEVEL_TOP or not node.isStatement(o)
       node.compileNode o
@@ -346,35 +347,29 @@ exports.Literal = class Literal extends Base
 exports.TypeName = class TypeName extends Base
   constructor: (@name) ->
 
-  children: ['name']
-
-  toString: -> '"' + @name.value + '"'
+  toString: -> @name
 
 exports.PointerType = class PointerType extends Base
-  constructor: (@base) ->
+  constructor: (@base, @onStack = no) ->
 
-  children: ['base']
-
-  toString: -> "*#{@base}"
+  toString: -> if @onStack then '' else '*' + @base.debugName
 
 exports.ArrowType = class ArrowType extends Base
   constructor: (@params, @ret) ->
 
-  children: ['params', 'ret']
-
   toString: -> "(#{@params.join(', ')}) -> #{@ret}"
 
 exports.StructType = class StructType extends Base
-  constructor: (@fields) ->
+  constructor: (fields) ->
+    @fields = fields
+    @names = names = {}
+    for field, i in fields
+      names[field.name] = field
 
-  children: ['fields']
-
-  toString: -> "struct {#{@fields.join(', ')} }"
+  toString: -> "struct { #{@fields.join(', ')} }"
 
 exports.StructField = class StructField extends Base
   constructor: (@name, @type) ->
-
-  children: ['name', 'type']
 
   toString: -> "#{@name}: #{@type}"
 
@@ -382,6 +377,10 @@ exports.TypeAssign = class TypeAssign extends Base
   constructor: (@name, @type) ->
 
   children: ['type']
+  isStatement: YES
+
+  compile: (o, level) ->
+    "#{o.indent}// type #{@name} = #{@type}"
 
   toString: (idt = '') ->
     '\n' + idt + @constructor.name + @name + '\n' + idt + TAB + @type
@@ -390,6 +389,10 @@ exports.DeclareType = class DeclareType extends Base
   constructor: (@variable, @type) ->
 
   children: ['variable', 'type']
+  isStatement: YES
+
+  compile: (o, level) ->
+    "#{o.indent}// #{@variable.compile o, LEVEL_LIST} :: #{@type}"
 
   toString: (idt = '') ->
     '\n' + idt + @constructor.name + @variable + '\n' + idt + TAB + @type
@@ -398,6 +401,9 @@ exports.Ref = class Ref extends Base
   constructor: (@expr) ->
 
   children: ['expr']
+
+  compileNode: (o) ->
+    throw new Error "address-of not implemented"
 
 exports.Deref = class Deref extends Base
   constructor: (@expr) ->
@@ -408,6 +414,9 @@ exports.Cast = class Cast extends Base
   constructor: (@expr, @type) ->
 
   children: ['expr', 'type']
+
+  compileNode: (o) ->
+    throw new Error 'cast not implemented'
 
   toString: (idt = '') ->
     '\n' + idt + @constructor.name + @expr + '\n' + idt + TAB + @type

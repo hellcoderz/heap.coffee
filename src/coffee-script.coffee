@@ -10,6 +10,7 @@ fs               = require 'fs'
 path             = require 'path'
 {Lexer,RESERVED} = require './lexer'
 {parser}         = require './parser'
+{analyzeTypes}   = require './type'
 vm               = require 'vm'
 
 # TODO: Remove registerExtension when fully deprecated.
@@ -34,7 +35,9 @@ exports.helpers = require './helpers'
 exports.compile = compile = (code, options = {}) ->
   {merge} = exports.helpers
   try
-    js = (parser.parse lexer.tokenize code).compile options
+    ast = parser.parse lexer.tokenize code
+    options.types = analyzeTypes ast
+    js = ast.compile options
     return js unless options.header
   catch err
     err.message = "In #{options.filename}, #{err.message}" if options.filename
