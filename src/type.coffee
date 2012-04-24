@@ -142,10 +142,10 @@ Base::computeType = (types, scope) ->
 Literal::computeType = (types, scope) ->
   return @computedType if @typeCached
   @typeCached = true
-  @computedType = if @isAssignable()
-    scope.typeOf @value
-  else if @value is 'null'
+  @computedType = if @value is 'null'
     anyPtrTy
+  else if @isAssignable()
+    scope.typeOf @value
   else if @isSimpleNumber()
     intTy
 
