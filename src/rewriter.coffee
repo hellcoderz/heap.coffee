@@ -104,6 +104,21 @@ class exports.Rewriter
       token[0] = 'IS_TYPE' if token[0] is '::' and (token.spaced or token.newLine) and tokens[i-1]?.spaced
       token[0] = 'TYPE' if token[0] is 'IDENTIFIER' and token[1] is 'type' and
                            tokens[i+1]?[0] is 'IDENTIFIER' and tokens[i+2]?[0] is '='
+      if token[0] is 'PARAM_START' and
+         tokens[--i]?[0] is 'IS_TYPE' and tokens[--i]?[0] is ')'
+        # Logic copied from Lexer::tagParameters.
+        tokens[i][0] = 'PARAM_END'
+        stack = []
+        while tok = tokens[--i]
+          switch tok[0]
+            when ')'
+              stack.push tok
+            when '(', 'CALL_START'
+              if stack.length then stack.pop()
+              else if tok[0] is '('
+                tok[0] = 'PARAM_START'
+                return 1
+              else return 1
       1
 
   # Object literals may be written with implicit braces, for simple cases.

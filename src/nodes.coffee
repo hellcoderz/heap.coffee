@@ -383,15 +383,24 @@ exports.TypeAssign = class TypeAssign extends Base
     "#{o.indent}// type #{@name} = #{@type}"
 
   toString: (idt = '') ->
-    '\n' + idt + @constructor.name + @name + '\n' + idt + TAB + @type
+    '\n' + idt + @constructor.name + ' ' + @name + '\n' + idt + TAB + @type
 
 exports.DeclareType = class DeclareType extends Base
   constructor: (@variable, @type) ->
 
-  children: ['variable', 'type']
+  children: ['variable']
   isStatement: YES
 
   compile: (o, level) ->
+    # A type declaration always declares a lexically-scoped variable. Typing
+    # an upvar is not allowed. We would really like to do this check during
+    # typechecking, but the logic for destructuring is too complicated to
+    # warrant duplicating in the typechecking phase.
+    scope = o.scope
+    name = @variable.unwrapAll().value
+    if scope.parent?.check name
+      throw TypeError "type for `#{name}' not declared in the same scope"
+    o.scope.find name
     "#{o.indent}// #{@variable.compile o, LEVEL_LIST} :: #{@type}"
 
   toString: (idt = '') ->
@@ -1295,6 +1304,7 @@ exports.Code = class Code extends Base
     code  = 'function'
     code  += ' ' + @name if @ctor
     code  += '(' + params.join(', ') + ') {'
+    code  += ' // :: (' + @paramTypes + ')' if @paramTypes
     code  += "\n#{ @body.compileWithDeclarations o }\n#{@tab}" unless @body.isEmpty()
     code  += '}'
     return @tab + code if @ctor

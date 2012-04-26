@@ -78,6 +78,7 @@ grammar =
   # Lines at the root can contain type synonyms
   RootLine: [
     o 'TypeAssign'
+    o 'DeclareType'
     o 'Expression'
     o 'Statement'
   ]
@@ -91,6 +92,7 @@ grammar =
 
   # Block and statements, which make up a line in a body.
   Line: [
+    o 'DeclareType'
     o 'Expression'
     o 'Statement'
   ]
@@ -110,7 +112,6 @@ grammar =
     o 'Value'
     o 'Invocation'
     o 'Code'
-    o 'DeclareType'
     o 'Operation'
     o 'Assign'
     o 'If'
@@ -163,31 +164,27 @@ grammar =
   ]
 
   StructField: [
-    o 'IDENTIFIER IS_TYPE BaseType',                -> new StructField $1, $3
-    o 'IDENTIFIER IS_TYPE INDENT BaseType OUTDENT', -> new StructField $1, $4
+    o 'IDENTIFIER IS_TYPE Type',                -> new StructField $1, $3
+    o 'IDENTIFIER IS_TYPE INDENT Type OUTDENT', -> new StructField $1, $4
     o 'Comment'
   ]
 
-  BaseType: [
-    o 'IDENTIFIER',                             -> new TypeName $1
-    o '* BaseType',                             -> new PointerType $2
+  TypeList: [
+    o '',                                                   -> []
+    o 'Type',                                               -> [$1]
+    o 'TypeList , Type',                                    -> $1.concat $3
+    o 'TypeList OptComma TERMINATOR Type',                  -> $1.concat $4
+    o 'TypeList OptComma INDENT TypeList OptComma OUTDENT', -> $1.concat $4
   ]
 
-  BaseTypeList: [
-    o '',                                                           -> []
-    o 'BaseType',                                                   -> [$1]
-    o 'BaseTypeList , BaseType',                                    -> $1.concat $3
-    o 'BaseTypeList OptComma TERMINATOR BaseType',                  -> $1.concat $4
-    o 'BaseTypeList OptComma INDENT BaseTypeList OptComma OUTDENT', -> $1.concat $4
-  ]
-
-  # This is not a full type system. Arrow types and struct types are not
-  # higher-order and can only contain base types.
+  # Pointer types have to be on named types. This is to make it clearer that
+  # comparison is nominal, not structural.
   Type: [
-    o 'BaseType'
-    o 'PARAM_START BaseTypeList PARAM_END -> INDENT BaseType OUTDENT', -> new ArrowType $2, $6
-    o 'STRUCT { StructFieldList OptComma }',                           -> new StructType $3
-    o 'STRUCT INDENT StructFieldList OptComma OUTDENT',                -> new StructType $3
+    o 'IDENTIFIER',                                            -> new TypeName $1
+    o '* IDENTIFIER',                                          -> new PointerType new TypeName $2
+    o 'PARAM_START TypeList PARAM_END -> INDENT Type OUTDENT', -> new ArrowType $2, $6
+    o 'STRUCT { StructFieldList OptComma }',                   -> new StructType $3
+    o 'STRUCT INDENT StructFieldList OptComma OUTDENT',        -> new StructType $3
   ]
 
   DeclareType: [
@@ -238,6 +235,10 @@ grammar =
   # of **Block** preceded by a function arrow, with an optional parameter
   # list.
   Code: [
+    o 'PARAM_START ParamList PARAM_END IS_TYPE PARAM_START TypeList PARAM_END FuncGlyph Block', ->
+      c = new Code $2, $9, $8
+      c.paramTypes = $6
+      c
     o 'PARAM_START ParamList PARAM_END FuncGlyph Block', -> new Code $2, $5, $4
     o 'FuncGlyph Block',                        -> new Code [], $2, $1
   ]

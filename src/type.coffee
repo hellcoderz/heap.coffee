@@ -10,7 +10,7 @@
 #
 
 {Scope} = require './scope'
-{Base, Block, Value, Literal, Op, Assign, Code, Index, Call
+{Base, Block, Value, Literal, Op, Assign, Code, Index, Call, Return,
  TypeAssign, DeclareType,
  Ref, Deref,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
@@ -32,26 +32,28 @@ Scope::typeOf = (name, immediate) ->
 # Many of the algorithms we do here are more naturally expressed as folds.
 # Also, instead of passing in a function, pass in a prop to be called on each
 # child, which pushes the typecase into the VM.
-Base::foldChildren = (r, m, o) ->
-  r = if typeof @[m] is 'function' then @[m](r, o) else r
+Base::foldChildren = (r, pre, post, o) ->
+  r = if typeof @[pre] is 'function' then @[pre](r, o) else r
   return r unless @children
 
   if o.immediate
     for attr in @children when @[attr]
       for child in flatten [@[attr]]
-        r = if typeof child[m] is 'function' then child[m](r, o) else r
+        r = if typeof child[pre] is 'function' then child[pre](r, o) else r
+        r = if post and typeof child[post] is 'function' then child[post](r, o) else r
   else
     for attr in @children when @[attr]
       for child in flatten [@[attr]]
-        r = child.foldChildren r, m, o
-  r
+        r = child.foldChildren r, pre, post, o
 
-Block::foldChildren = (r, m, o) ->
-  super(r, m, (extend {}, o))
+  if post and typeof @[post] is 'function' then @[post](r, o) else r
 
-Code::foldChildren = (r, m, o) ->
+Block::foldChildren = (r, pre, post, o) ->
+  super(r, pre, post, (extend {}, o))
+
+Code::foldChildren = (r, pre, post, o) ->
   return r unless o.crossScope
-  super(r, m, (extend {}, o))
+  super(r, pre, post, o)
 
 # Collect type synonyms.
 TypeAssign::collectType = (types) ->
@@ -101,76 +103,75 @@ ArrowType::lint = (types) ->
   return this if @linted
   @linted = true
   ty = @ret.lint types
-  if ty instanceof ArrowType
-    throw TypeError "cannot type higher-order functions"
   @ret = ty
-  for ty, i in @params
-    ty = ty.lint types
-    if ty instanceof ArrowType
-      throw TypeError "cannot type higher-order functions"
-    params[i] = ty
+  params = @params
+  for ty, i in params
+    params[i] = ty.lint types
   this
 
 # Are two types compatible, i.e. can they be assigned to each other?
 unify = (types, ty1, ty2) ->
   # Compatibility is reflexive.
   return ty1 if ty1 is ty2
-
+  # Undefined, or dynamic, and anything is the other thing.
+  return ty1 unless ty2
+  return ty2 unless ty1
   # A null or malloc or something is compatible with any pointer type.
   return ty1 if ty1 instanceof PointerType and ty2 is anyPtrTy
   return ty2 if ty2 instanceof PointerType and ty1 is anyPtrTy
-
   # Two pointer types are compatible iff their bases are compatible.
   if ty1 instanceof PointerType and ty2 instanceof PointerType
     base = unify types, ty1.base, ty2.base
     return new PointerType base if base
-
+  # Two function types are compatible if their parameters and return types are
+  # compatible.
+  if ty1 instanceof ArrowType and ty2 instanceof ArrowType
+    ptys1 = ty1.params
+    ptys2 = ty2.params
+    return unless ptys1.length is ptys2.length
+    ptys = []
+    for pty1, i in ptys1
+      return unless pty = unify types, pty1, ptys2[i]
+      ptys.push pty
+    return new ArrowType ptys, rty if rty = unify types, ty1.ret, ty2.ret
   null
 
-# A node is typed if it's inside a typed scope, the list of types is
-# non-empty, and it's typable.
-Base::isTyped = (o) ->
-  types = o.types
-  scope = o.typedScope
-  return false unless types and scope
-  !!(@computeType types, scope)
-
 # By default, computeType returns undefined, which means dynamic.
-Base::computeType = (types, scope) ->
+Base::computeType = (r, o) ->
 
 # Simple identifiers and integer literals may be typed.
-Literal::computeType = (types, scope) ->
+Literal::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
   @computedType = if @value is 'null'
     anyPtrTy
   else if @isAssignable()
-    scope.typeOf @value
+    o.scope.typeOf @value
   else if @isSimpleNumber()
     intTy
 
-Assign::computeType = (types, scope) ->
+Assign::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  return unless lhTy = @variable.unwrapAll().computeType types, scope
-  rhTy = @value.unwrapAll().computeType types, scope
+  return unless lhTy = @variable.unwrapAll().computeType r, o
+  rhTy = @value.unwrapAll().computeType r, o
   # We don't have a more sophisticated subtyping story, so we do the
   # asymmetric typechecking here manually.
   throw TypeError 'cannot assign untyped to typed' unless rhTy
-  unless @computedType = unify types, lhTy, rhTy
+  unless @computedType = unify o.types, lhTy, rhTy
     throw TypeError "incompatible types in assignment: `#{lhTy}' and `#{rhTy}'"
 
 # Accesses on struct types may be typed. If we arrived at this case it's
 # because unwrapAll() didn't manage to unwrap value, i.e. this is a properties
 # access.
-Value::computeType = (types, scope) ->
+Value::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  if baseTy = @base.unwrapAll().computeType types, scope
+  if baseTy = @base.unwrapAll().computeType r, o
     for prop in @properties
       baseTy = baseTy.base if baseTy instanceof PointerType
       return unless baseTy instanceof StructType
-      throw TypeError "cannot soak field names" if prop.soak
+      throw TypeError "cannot soak struct field names" if prop.soak
       fieldName = prop.name.unwrapAll().value
       field = baseTy.names[fieldName]
       throw TypeError "unknown struct field name `#{fieldName}'" unless field
@@ -178,9 +179,22 @@ Value::computeType = (types, scope) ->
       baseTy = field.type
     @computedType = baseTy
 
+# Functions are be typed if their parameters are typed and all return
+# expression types unify.
+Code::computeType = (r, o) ->
+  return @computedType if @typeCached
+  @typeCached = true
+  # Arriving in this function means that all the parameters typechecked, since
+  # this is called after the body has been processed. So we just need to
+  # collect the return expressions and unify their types.
+  types = o.types
+  rty = null
+  rty = unify types, ty.computedType, rty for ty in returnExpressions @body
+  @computedType = new ArrowType @paramTypes, rty
+
 # Allocations, pointer arithmetic, and foldably constant arithmetic
 # expressions may be typed.
-Op::computeType = (types, scope) ->
+Op::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
 
@@ -189,16 +203,16 @@ Op::computeType = (types, scope) ->
   # Typed unary operations like dereferencing are separate nodes.
   if @isUnary()
     first = @first.unwrapAll()
-    return @computedType = if op is 'new' and (ty1 = types[first.value])
+    return @computedType = if op is 'new' and (ty1 = o.types[first.value])
       throw TypeError 'cannot allocate type with size 0' unless ty1.size
       new PointerType ty1
-    else if op is 'delete' and (ty1 = first.computeType types, scope)
+    else if op is 'delete' and (ty1 = first.computeType r, o)
       throw TypeError 'cannot free non-pointer type' unless ty1 instanceof PointerType
       throw TypeError 'cannot free on-stack variables' if ty1.onStack
       unitTy
 
-  ty1 = @first.unwrapAll().computeType types, scope
-  ty2 = @second.unwrapAll().computeType types, scope
+  ty1 = @first.unwrapAll().computeType r, o
+  ty2 = @second.unwrapAll().computeType r, o
 
   # Commute.
   if ty2 instanceof PointerType
@@ -212,64 +226,42 @@ Op::computeType = (types, scope) ->
   @computedType = if op is '+' and ty1 instanceof PointerType and ty2 in primTys
     ty1
   else if op is '-' and ty1 instanceof PointerType and ty2 instanceof PointerType
-    intTy if unify types, ty1.base, ty2.base
+    intTy if unify o.types, ty1.base, ty2.base
   else if op in ARITH_OPS and ty1 in primTys and ty2 in primTys
     intTy
 
 # Reference gets you a pointer type.
-Ref::computeType = (types, scope) ->
+Ref::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  ty = @expr.unwrapAll().computeType types, scope
+  ty = @expr.unwrapAll().computeType r, o
   throw TypeError "taking reference of an untyped expression:\n#{@expr}" unless ty
   throw TypeError "taking reference of a function type" if ty instanceof ArrowType
   @computedType = new PointerType ty
 
 # Dereferencing gets the base type of the pointer type.
-Deref::computeType = (types, scope) ->
+Deref::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  ty = @expr.unwrapAll().computeType types, scope
+  ty = @expr.unwrapAll().computeType r, o
   throw TypeError "dereferencing an untyped expression:\n#{@expr}" unless ty
   throw TypeError "dereferencing a non-pointer type" unless ty instanceof PointerType and not ty.onStack
   @computedType = ty.base
 
-# Type inference, if it can be called that. It collects type declarations and
-# then wraps around @computeType.
-#
-# Type declarations are block-scoped, even though variables themselves aren't!
-#
-# Because of CoffeeScript's dynamicness, we can _override_ types of the same
-# vars in the same block, i.e.:
-#
-#  x :: int
-#  x = 0
-#  ...
-#  x :: *T
-#  x = new T
-#
-# should work as expected in the same scope.
-newTypedScope = newTypedScope = (p, e, m) ->
+# Gather return expressions.
+returnExpressions = (body) ->
+  exprs = body.expressions
+  body.foldChildren [exprs[exprs.length - 1]], 'returnExpression', null, {}
+
+Return::returnExpression = (exprs, o) ->
+  exprs.push @expression
+  exprs
+
+# Add parameter and return types to the typed scope.
+newTypedScope = (p, e, m) ->
   scope = new Scope p, e, m
   scope.variables.length = 0
   scope
-
-Block::inferType = (r, o) ->
-  o.scope = newTypedScope o.scope, @body, this
-  return
-
-DeclareType::inferType = (r, o) ->
-  types = o.types
-  @type = @type.lint types
-  # Stack-allocated pointers to structs
-  if @type instanceof StructType
-    @type = new PointerType @type, yes
-  o.scope.add @variable.unwrapAll().value, @type
-  return
-
-Literal::inferType = (r, o) ->
-  @computeType o.types, o.scope
-  return
 
 # Find function bindings to match up arrow types.
 #
@@ -282,39 +274,55 @@ Literal::inferType = (r, o) ->
 # is equivalent to
 #
 #   f :: (int) -> int
-#   f =  (x) ->
-#     x :: int
-#     x
+#   f =  (x) :: (int) -> x
 #
 # _only_ when the binding for f is a _syntactic_ function. If not, you would
 # have to declare the types of arguments manually.
-Assign::inferType = (r, o) ->
+Assign::primeComputeType = (r, o) ->
   if (fn = @value.unwrapAll()) instanceof Code and
-     (name = @variable.unwrapAll()) instanceof Literal and name.isAssignable()
-    if (ty = o.scope.typeOf name.value) instanceof ArrowType
-      exprs    = fn.body.expressions
-      paramTys = ty.params
-      for { name: p }, i in fn.params when paramTys[i] and p instanceof Literal
-        exprs.unshift new DeclareType(p, paramTys[i])
-
-  @computeType o.types, o.scope
+     (name = @variable.unwrapAll()) instanceof Literal and name.isAssignable() and
+     (ty = o.scope.typeOf name.value) instanceof ArrowType
+    # Remember the parameter and return types on the right-hand side.
+    fn.paramTypes ?= ty.params
+    fn.returnType ?= ty.ret
   return
 
-Value::inferType = (r, o) ->
-  # If one of the field names is unknown, @computeType throws.
-  @computeType o.types, o.scope
+# Declare parameter types, and propagate the return type to return expressions
+# if the return type is an arrow type.
+Code::primeComputeType = (r, o) ->
+  # If the declared return type is an arrow type, recur on all return
+  # positions and propagate like we do in Assign::primeComputeType.
+  rty = @returnType
+  if rty instanceof ArrowType
+    for rexpr in returnExpressions @body when rexpr instanceof Code
+      rexpr.paramTypes ?= rty.params
+      rexpr.returnType ?= rty.ret
+  # Make a new scope and declare parameter types.
+  o.scope = newTypedScope o.scope, @body, this
+  ptys = @paramTypes
+  if ptys
+    if ptys.length isnt @params.length
+      throw TypeError "arrow type has different number of parameters than function"
+    types = o.types
+    for { name }, i in @params
+      unless name instanceof Literal
+        throw TypeError "cannot type complex parameter `#{name}'"
+      # Lint just in case the user manually declared the parameter types and
+      # thus the types were not linted before this point.
+      ptys[i] = ptys[i].lint types
+      (new DeclareType new Value(name), ptys[i]).primeComputeType r, o
   return
 
-Op::inferType = (r, o) ->
-  @computeType o.types, o.scope
-  return
-
-Ref::inferType = (r, o) ->
-  @computeType o.types, o.scope
-  return
-
-Deref::inferType = (r, o) ->
-  @computeType o.types, o.scope
+# Declaring a type adds the type to the scope.
+DeclareType::primeComputeType = (r, o) ->
+  @type = @type.lint o.types
+  # Stack-allocated pointers to structs
+  if @type instanceof StructType
+    @type = new PointerType @type, yes
+  name = @variable.unwrapAll().value
+  scope = o.scope
+  throw TypeError "cannot redeclare typed variable `#{name}'" if scope.check name
+  scope.add @variable.unwrapAll().value, @type
   return
 
 # A typed value with properties can only a struct access.
@@ -324,10 +332,9 @@ Deref::inferType = (r, o) ->
 Value::transform = ->
   props = @properties
   return unless @computedType and props.length
-
   heapOffset = (idx, prop) ->
     new Value HEAP, [new Index new Op '+', idx,
-                     new Value (new Literal prop.computedOffset)]
+                     new Value new Literal prop.computedOffset]
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
   getExpr = -> @expr
@@ -370,8 +377,9 @@ class PrimitiveType
   lint: (types) -> this
   toString: -> @debugName
 
-# The any pointer type is not exported to the language, but is used so null
-# and malloc can be implicitly coerced to any pointer type.
+# The any pointer type, or unity type are not exported to the language, but
+# used internally. The any pointer type is used to typecheck null, and the
+# unit type is used to type free.
 anyPtrTy = new PrimitiveType 0, '*'
 unitTy   = new PrimitiveType 0, '()'
 byteTy   = new PrimitiveType 1, 'byte'
@@ -388,11 +396,13 @@ primitiveTypes =
 exports.analyzeTypes = (root) ->
   return unless root.containsType DeclareType
 
-  types = root.foldChildren primitiveTypes, 'collectType', immediate: true
+  types = root.foldChildren primitiveTypes, 'collectType', null, immediate: true
   types[name] = ty.lint types for name, ty of types
 
-  scope = newTypedScope null, root, null
-  o = { types: types, scope: scope, crossScope: true }
-  root.foldChildren null, 'inferType', o
+  options =
+    types: types,
+    scope: newTypedScope(null, root, null)
+    crossScope: true
+  root.foldChildren null, 'primeComputeType', 'computeType', options
 
   types
