@@ -240,12 +240,17 @@ Op::computeType = (r, o) ->
     ty1 = ty2
     ty2 = tmp
 
-  ARITH_OPS = [ '+', '-', '*', '/', '<<', '>>', '>>>', '~', '&', '|' ]
+  ARITH_OPS   = [ '+', '-', '*', '/' ]
+  BITWISE_OPS = [ '<<', '>>', '>>>', '~', '&', '|' ]
 
   @computedType = if op is '+' and ty1 instanceof PointerType and ty2 in primTys
     ty1
   else if op is '-' and ty1 instanceof PointerType and ty2 instanceof PointerType
     intTy if unify o.types, ty1.base, ty2.base
+  else if op is '%'
+    intTy
+  else if op in BITWISE_OPS
+    ty1
   else if op in ARITH_OPS and ty1 in primTys and ty2 in primTys
     unify o.types, ty1, ty2
 
