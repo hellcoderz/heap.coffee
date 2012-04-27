@@ -10,18 +10,26 @@
 #
 
 {Scope} = require './scope'
-{Base, Block, Value, Literal, Op, Assign, Code, Index, Call, Return,
- TypeAssign, DeclareType,
- Ref, Deref,
+{Base, Parens, Block, Value, Literal, Op, Assign,
+ Code, Index, Access, Call, Return, Obj,
+ TypeAssign, DeclareType, Ref, Deref,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend} = require './helpers'
 
+# HEAP is the byte-sized view.
 HEAP   = new Literal '_H'
 HEAPV  = new Value HEAP
 STACK  = new Literal '_S'
 STACKV = new Value STACK
+# Views of other sizes.
+I16H   = new Literal '_I16H'
+U16H   = new Literal '_U16H'
+I32H   = new Literal '_I32H'
+U32H   = new Literal '_U32H'
 MALLOC = new Literal '_malloc'
 FREE   = new Literal '_free'
+
+shiftBy = (size) -> Math.log(size) / Math.log(2)
 
 # This is like @type, but it also looks up the scope chain.
 Scope::typeOf = (name, immediate) ->
@@ -173,9 +181,8 @@ Value::computeType = (r, o) ->
       return unless baseTy instanceof StructType
       throw TypeError "cannot soak struct field names" if prop.soak
       fieldName = prop.name.unwrapAll().value
-      field = baseTy.names[fieldName]
+      field = prop.computedField = baseTy.names[fieldName]
       throw TypeError "unknown struct field name `#{fieldName}'" unless field
-      prop.computedOffset = field.offset
       baseTy = field.type
     @computedType = baseTy
 
@@ -325,6 +332,34 @@ DeclareType::primeComputeType = (r, o) ->
   scope.add @variable.unwrapAll().value, @type
   return
 
+# Helper function to dereference something in a heap view.
+makeDeref = (base, offset, ty) ->
+  throw TypeError "unknown view on type `#{ty}'" unless ty.view
+  if offset isnt 0
+    offsetOp = new Op '+', base, new Value new Literal offset
+  else
+    offsetOp = base
+  new Value ty.view, [new Index new Op '>>', offsetOp, new Literal shiftBy ty.size]
+
+# Do copy semantics on a struct pointer.
+structLiteral = (v, ty) ->
+  def = new Literal 'ptr'
+  use = new Literal 'ptr'
+  def.ensureFresh = use
+  propList = []
+  for field in ty.fields
+    fname = field.name
+    # Use transform here to get a struct literal out, since we have to compute
+    # the offset for the field. We have to manually set the types, kind of
+    # gross.
+    access = new Access(new Literal fname)
+    access.computedField = field
+    propValue = new Value use, [access]
+    propValue.computedType = field.type
+    propList.push new Assign new Value(new Literal fname), propValue.transform(), 'object'
+  obj = new Value new Obj propList
+  new Value new Parens new Block [new Assign(new Value(def), v), obj]
+
 # A typed value with properties can only a struct access.
 #
 # Transform this Value into a new Value that does offset index lookups on
@@ -332,15 +367,26 @@ DeclareType::primeComputeType = (r, o) ->
 Value::transform = ->
   props = @properties
   return unless @computedType and props.length
-  heapOffset = (idx, prop) ->
-    new Value HEAP, [new Index new Op '+', idx,
-                     new Value new Literal prop.computedOffset]
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
-  getExpr = -> @expr
+  passthrough = -> @expr.transform()
   inner = @base.unwrapAll()
-  inner.transform = getExpr if inner instanceof Deref
-  props.reduce heapOffset, @base
+  inner.transform = passthrough if inner instanceof Deref
+  v = @base
+  cumulativeOffset = 0;
+  for prop in props
+    field = prop.computedField
+    if (ty = field.type) instanceof StructType
+      cumulativeOffset += field.offset
+    else
+      v = makeDeref v, field.offset + cumulativeOffset, ty
+      cumulativeOffset = 0
+  if ty instanceof StructType
+    if cumulativeOffset isnt 0
+      v = new Op '+', v, new Value new Literal cumulativeOffset
+    structLiteral v, ty
+  else
+    v
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
@@ -359,21 +405,27 @@ Op::transform = ->
     else if op is '-' and (ty = @first.computedType) instanceof PointerType
       this.transform = null
       # Typechecking already ensures that @second.computedType is ty.
-      new Op '>>', this, new Literal(Math.log(ty.base.size) / Math.log(2))
+      new Op '>>', this, new Literal(shiftBy ty.base.size)
 
 # TODO
 Ref::transform = ->
   @expr
 
 # This is only called when this deref is _not_ the base of a struct access, as
-# in struct accesses, dereferencing is the same as not dereferencing, as . is
-# extended to work like -> in C.
+# in struct accesses, dereferencing is the same as not dereferencing, since
+# . is extended to work like -> in C.
 Deref::transform = ->
-  new Value HEAP, [new Index @expr]
+  if (ty = @computedType) instanceof StructType
+    structLiteral @expr, ty
+  else
+    makeDeref @expr, 0, ty
+
+# Pointers are 4-byte aligned for now.
+PointerType::view = U32H
 
 # Primitive types as found in C.
 class PrimitiveType
-  constructor: (@size, @debugName) ->
+  constructor: (@size, @debugName, @view) ->
   lint: (types) -> this
   toString: -> @debugName
 
@@ -382,10 +434,10 @@ class PrimitiveType
 # unit type is used to type free.
 anyPtrTy = new PrimitiveType 0, '*'
 unitTy   = new PrimitiveType 0, '()'
-byteTy   = new PrimitiveType 1, 'byte'
-shortTy  = new PrimitiveType 2, 'short'
-intTy    = new PrimitiveType 4, 'int'
-uintTy   = new PrimitiveType 4, 'uint'
+byteTy   = new PrimitiveType 1, 'byte', HEAP
+shortTy  = new PrimitiveType 2, 'short', I16H
+intTy    = new PrimitiveType 4, 'int', I32H
+uintTy   = new PrimitiveType 4, 'uint', U32H
 
 primitiveTypes =
   byte:  byteTy
