@@ -46,17 +46,17 @@ f = (x) -> (y) -> x * y
   // type node = struct { val: int, next: *node }
 
   // n :: *node
-  n = _malloc(_H, 8);
+  n = malloc(H, 8);
   // m :: *node
-  m = _malloc(_H, 8);
+  m = malloc(H, 8);
 
-  _H[n + 0] = 0;
-  _H[n + 4] = m;
-  _H[m + 0] = 1;
-  _H[m + 4] = null;
+  H[n + 0] = 0;
+  H[n + 4] = m;
+  H[m + 0] = 1;
+  H[m + 4] = null;
 
-  _free(_H, n);
-  _free(_H, m);
+  free(H, n);
+  free(H, m);
 
   // f :: (int) -> (int) -> int
   f = function(x) { // :: (int)
@@ -98,7 +98,8 @@ Free using `delete`:
 delete n
 ```
 
-Dereferencing and taking the address of variables are just like in C:
+Dereferencing in expressions and taking the address of variables are just like
+in C:
 
 ```coffeescript
 v  = *n
@@ -111,6 +112,15 @@ pointer is automatic.
 ```coffeescript
 n = n.next
 n = (*n).next # semantically equivalent to above
+```
+
+Use := to assign to the memory location of a pointer type. Unfortunately,
+C-like syntax `*p = e` causes an ambiguity in the CoffeeScript grammar.
+
+```coffeescript
+i :: *int
+i  = new int
+i := 42
 ```
 
 Pointer arithmetic work as it does in C.
