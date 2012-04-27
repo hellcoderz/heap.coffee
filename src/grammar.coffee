@@ -199,9 +199,13 @@ grammar =
 
   # Assignment of a variable, property, or index to a value.
   Assign: [
-    o 'Assignable = Expression',                -> new Assign $1, $3
-    o 'Assignable = TERMINATOR Expression',     -> new Assign $1, $4
-    o 'Assignable = INDENT Expression OUTDENT', -> new Assign $1, $4
+    o 'Assignable = Expression',                 -> new Assign $1, $3
+    o 'Assignable = TERMINATOR Expression',      -> new Assign $1, $4
+    o 'Assignable = INDENT Expression OUTDENT',  -> new Assign $1, $4
+  ]
+
+  AssignGlyph: [
+    o '='
   ]
 
   # Assignment when it happens within an object literal. The difference from
@@ -579,8 +583,8 @@ grammar =
   # rules are necessary.
   Operation: [
     o 'UNARY Expression',                       -> new Op $1 , $2
-    o '*     Expression',                       -> new Deref $2
-    o '&     Expression',                       -> new Ref $2
+    o '*     Expression',                       -> new Deref $2, prec: 'UNARY'
+    o '&     Expression',                       -> new Ref $2, prec: 'UNARY'
     o '-     Expression',                      (-> new Op '-', $2), prec: 'UNARY'
     o '+     Expression',                      (-> new Op '+', $2), prec: 'UNARY'
 
@@ -610,6 +614,9 @@ grammar =
       else
         new Op $2, $1, $3
 
+    o 'SimpleAssignable := Expression',         -> new Assign new Deref($1), $3, $2
+    o 'SimpleAssignable :=
+       INDENT Expression OUTDENT',              -> new Assign new Deref($1), $4, $2
     o 'SimpleAssignable COMPOUND_ASSIGN
        Expression',                             -> new Assign $1, $3, $2
     o 'SimpleAssignable COMPOUND_ASSIGN
@@ -634,7 +641,7 @@ operators = [
   ['left',      'CALL_START', 'CALL_END']
   ['nonassoc',  '++', '--']
   ['left',      '?']
-  ['right',     'UNARY']
+  ['right',     'UNARY', '*', '&']
   ['left',      'AS']
   ['left',      '*', 'MATH']
   ['left',      '+', '-']
@@ -643,7 +650,7 @@ operators = [
   ['left',      'COMPARE']
   ['left',      '&', 'LOGIC']
   ['nonassoc',  'INDENT', 'OUTDENT']
-  ['right',     '=', ':', 'COMPOUND_ASSIGN', 'RETURN', 'THROW', 'EXTENDS']
+  ['right',     '=', ':', ':=', 'COMPOUND_ASSIGN', 'RETURN', 'THROW', 'EXTENDS']
   ['right',     'FORIN', 'FOROF', 'BY', 'WHEN']
   ['right',     'IF', 'ELSE', 'FOR', 'WHILE', 'UNTIL', 'LOOP', 'SUPER', 'CLASS']
   ['right',     'POST_IF']

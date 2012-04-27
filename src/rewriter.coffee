@@ -101,6 +101,11 @@ class exports.Rewriter
   disambiguateTypeStuff: ->
 
     @scanTokens (token, i, tokens) ->
+      if token[0] is ':' and tokens[i+1]?[0] is '='
+        token[0] = ':='
+        token[1] = '='
+        tokens.splice i+1, 1
+        return 1
       token[0] = 'IS_TYPE' if token[0] is '::' and (token.spaced or token.newLine) and tokens[i-1]?.spaced
       token[0] = 'TYPE' if token[0] is 'IDENTIFIER' and token[1] is 'type' and
                            tokens[i+1]?[0] is 'IDENTIFIER' and tokens[i+2]?[0] is '='

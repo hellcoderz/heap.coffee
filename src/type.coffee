@@ -11,23 +11,24 @@
 
 {Scope} = require './scope'
 {Base, Parens, Block, Value, Literal, Op, Assign,
- Code, Index, Access, Call, Return, Obj,
+ Code, Index, Access, Call, Return, Obj, While
  TypeAssign, DeclareType, Ref, Deref,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend} = require './helpers'
 
 # HEAP is the byte-sized view.
-HEAP   = new Literal '_H'
+HEAP   = new Literal 'H'
 HEAPV  = new Value HEAP
-STACK  = new Literal '_S'
+STACK  = new Literal 'S'
 STACKV = new Value STACK
 # Views of other sizes.
-I16H   = new Literal '_I16H'
-U16H   = new Literal '_U16H'
-I32H   = new Literal '_I32H'
-U32H   = new Literal '_U32H'
-MALLOC = new Literal '_malloc'
-FREE   = new Literal '_free'
+I16H   = new Literal 'I16H'
+U16H   = new Literal 'U16H'
+I32H   = new Literal 'I32H'
+U32H   = new Literal 'U32H'
+MALLOC = new Value new Literal 'malloc'
+FREE   = new Value new Literal 'free'
+MEMCPY = new Value new Literal 'memcpy'
 
 shiftBy = (size) -> Math.log(size) / Math.log(2)
 
@@ -322,17 +323,17 @@ Code::primeComputeType = (r, o) ->
 
 # Declaring a type adds the type to the scope.
 DeclareType::primeComputeType = (r, o) ->
-  @type = @type.lint o.types
+  type = @type.lint o.types
   # Stack-allocated pointers to structs
-  if @type instanceof StructType
-    @type = new PointerType @type, yes
+  if type instanceof StructType
+    type = new PointerType type, yes
   name = @variable.unwrapAll().value
   scope = o.scope
   throw TypeError "cannot redeclare typed variable `#{name}'" if scope.check name
-  scope.add @variable.unwrapAll().value, @type
+  scope.add @variable.unwrapAll().value, type
   return
 
-# Helper function to dereference something in a heap view.
+# Dereference something in a heap view.
 makeDeref = (base, offset, ty) ->
   throw TypeError "unknown view on type `#{ty}'" unless ty.view
   if offset isnt 0
@@ -341,11 +342,29 @@ makeDeref = (base, offset, ty) ->
     offsetOp = base
   new Value ty.view, [new Index new Op '>>', offsetOp, new Literal shiftBy ty.size]
 
-# Do copy semantics on a struct pointer.
-structLiteral = (v, ty) ->
-  def = new Literal 'ptr'
-  use = new Literal 'ptr'
-  def.ensureFresh = use
+# Generate an inline memcpy.
+inlineMemcpy = (dest, src, n, ret, o) ->
+  scope = o.scope
+  stmts = []
+  # Store the pointer to the struct we're copying to.
+  destPtr = new Value new Literal scope.freeVariable 'dest'
+  stmts.push new Assign destPtr, dest
+  # Store the pointer to the struct we're copying from.
+  srcPtr = new Value new Literal scope.freeVariable 'src'
+  stmts.push new Assign srcPtr, src
+  # Loop over the bytes and copy.
+  endVal = new Op '+', destPtr, new Literal n
+  loopBody = new Assign new Value(HEAP, [new Index new Op '++', destPtr, null, true]),
+                        new Value(HEAP, [new Index new Op '++', srcPtr, null, true])
+  memcpy = new While new Op('<', destPtr, endVal)
+  memcpy.addBody new Block [loopBody]
+  stmts.push memcpy
+  stmts.push ret
+  new Value new Parens new Block stmts
+
+# Reflect a heap-allocated struct as a JavaScript object literal.
+structLiteral = (v, ty, o) ->
+  ptr = new Literal o.scope.freeVariable 'ptr'
   propList = []
   for field in ty.fields
     fname = field.name
@@ -354,25 +373,22 @@ structLiteral = (v, ty) ->
     # gross.
     access = new Access(new Literal fname)
     access.computedField = field
-    propValue = new Value use, [access]
+    propValue = new Value ptr, [access]
     propValue.computedType = field.type
     propList.push new Assign new Value(new Literal fname), propValue.transform(), 'object'
   obj = new Value new Obj propList
-  new Value new Parens new Block [new Assign(new Value(def), v), obj]
+  new Value new Parens new Block [new Assign(new Value(ptr), v), obj]
 
 # A typed value with properties can only a struct access.
 #
 # Transform this Value into a new Value that does offset index lookups on
 # HEAP.
-Value::transform = ->
+Value::transform = (o) ->
   props = @properties
   return unless @computedType and props.length
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
-  passthrough = -> @expr.transform()
-  inner = @base.unwrapAll()
-  inner.transform = passthrough if inner instanceof Deref
-  v = @base
+  v = if (inner = @base.unwrapAll()) instanceof Deref then inner.expr else @base
   cumulativeOffset = 0;
   for prop in props
     field = prop.computedField
@@ -381,22 +397,30 @@ Value::transform = ->
     else
       v = makeDeref v, field.offset + cumulativeOffset, ty
       cumulativeOffset = 0
-  if ty instanceof StructType
-    if cumulativeOffset isnt 0
-      v = new Op '+', v, new Value new Literal cumulativeOffset
-    structLiteral v, ty
+  if ty instanceof StructType and cumulativeOffset isnt 0
+    # This is not a pointer, but transform a pointer anyways so memcpy can
+    # work. Typechecking ensures that this isn't used like a pointer.
+    new Op '+', v, new Value new Literal cumulativeOffset
   else
     v
 
+# Do struct copy semantics here since it requires a non-local transformation,
+# i.e. it can't be compiled by transforming the lval and rval individually.
+Assign::transform = (o) ->
+  lval = @variable
+  ty = @computedType
+  return unless lval instanceof Deref and ty instanceof StructType
+  new Call MEMCPY, [HEAPV, lval.expr, @value, new Literal ty.size]
+
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
-Op::transform = ->
+Op::transform = (o) ->
   op = @operator
   if op is 'new' and ty = @computedType
     m = if ty.onStack then STACKV else HEAPV
-    new Call new Value(MALLOC), [m, new Value(new Literal ty.base.size)]
+    new Call MALLOC, [m, new Value new Literal ty.base.size]
   else if op is 'delete' and @first.computedType
-    new Call new Value(FREE), [HEAPV, @first]
+    new Call FREE, [HEAPV, @first]
   else if @computedType and not @isUnary()
     if op is '+' and (ty = @first.computedType) instanceof PointerType
       new Op '+', @first, new Op('*', @second, new Literal ty.base.size)
@@ -408,17 +432,14 @@ Op::transform = ->
       new Op '>>', this, new Literal(shiftBy ty.base.size)
 
 # TODO
-Ref::transform = ->
+Ref::transform = (o) ->
   @expr
 
 # This is only called when this deref is _not_ the base of a struct access, as
 # in struct accesses, dereferencing is the same as not dereferencing, since
 # . is extended to work like -> in C.
-Deref::transform = ->
-  if (ty = @computedType) instanceof StructType
-    structLiteral @expr, ty
-  else
-    makeDeref @expr, 0, ty
+Deref::transform = (o) ->
+  makeDeref @expr, 0, @expr.computedType
 
 # Pointers are 4-byte aligned for now.
 PointerType::view = U32H
