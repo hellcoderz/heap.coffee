@@ -36,7 +36,7 @@ exports.compile = compile = (code, options = {}) ->
   {merge} = exports.helpers
   try
     ast = parser.parse lexer.tokenize code
-    options.types = analyzeTypes ast
+    options.types = analyzeTypes ast, options
     js = ast.compile options
     return js unless options.header
   catch err

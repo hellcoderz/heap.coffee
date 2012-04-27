@@ -30,6 +30,10 @@ MALLOC = new Value new Literal 'malloc'
 FREE   = new Value new Literal 'free'
 MEMCPY = new Value new Literal 'memcpy'
 
+# Global option for if we should print warnings.
+opts = { warn: false }
+printWarn = (line) -> process.stderr.write 'warning: ' + line + '\n' if opts.warn
+
 shiftBy = (size) -> Math.log(size) / Math.log(2)
 
 # This is like @type, but it also looks up the scope chain.
@@ -118,31 +122,41 @@ ArrowType::lint = (types) ->
     params[i] = ty.lint types
   this
 
-# Are two types compatible, i.e. can they be assigned to each other?
-unify = (types, ty1, ty2) ->
+# Are two types compatible, i.e. can rty be assigned into lty?
+unify = (types, lty, rty, assign) ->
   # Compatibility is reflexive.
-  return ty1 if ty1 is ty2
-  # Undefined, or dynamic, and anything is the other thing.
-  return ty1 unless ty2
-  return ty2 unless ty1
+  return lty if lty is rty
+  # If either side is dynamic, the expression is untypable.
+  return unless lty and rty
   # A null or malloc or something is compatible with any pointer type.
-  return ty1 if ty1 instanceof PointerType and ty2 is anyPtrTy
-  return ty2 if ty2 instanceof PointerType and ty1 is anyPtrTy
+  return lty if lty instanceof PointerType and rty is anyPtrTy
+  return rty if rty instanceof PointerType and lty is anyPtrTy
   # Two pointer types are compatible iff their bases are compatible.
-  if ty1 instanceof PointerType and ty2 instanceof PointerType
-    base = unify types, ty1.base, ty2.base
+  if lty instanceof PointerType and rty instanceof PointerType
+    base = unify types, lty.base, rty.base
     return new PointerType base if base
   # Two function types are compatible if their parameters and return types are
   # compatible.
-  if ty1 instanceof ArrowType and ty2 instanceof ArrowType
-    ptys1 = ty1.params
-    ptys2 = ty2.params
-    return unless ptys1.length is ptys2.length
+  if lty instanceof ArrowType and rty instanceof ArrowType
+    lptys = lty.params
+    rptys = rty.params
+    return unless lptys.length is rptys.length
     ptys = []
-    for pty1, i in ptys1
-      return unless pty = unify types, pty1, ptys2[i]
+    for lpty, i in lptys
+      return unless pty = unify types, lpty, rptys[i]
       ptys.push pty
-    return new ArrowType ptys, rty if rty = unify types, ty1.ret, ty2.ret
+    return new ArrowType ptys, ret if ret = unify types, lty.ret, rty.ret
+  # Primitive types follow C-like promotion rules.
+  if lty in primTys and rty in primTys
+    # If we're assigning, return the left type, else return the wider primitive.
+    if lty.size isnt rty.size
+      printWarn "conversion from `#{rty}' to `#{lty}' may alter its value"
+      return if assign then lty else if lty.size > rty.size then lty else rty
+    # Return the sign of the left type if they're the same size. This is just
+    # to break the tie arbitrarily and to behave as expected for assignments.
+    if lty.signed isnt rty.signed
+      printWarn "conversion from `#{rty}' to `#{lty}' may alter its sign"
+      return lty
   null
 
 # By default, computeType returns undefined, which means dynamic.
@@ -162,13 +176,11 @@ Literal::computeType = (r, o) ->
 Assign::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  return unless lhTy = @variable.unwrapAll().computeType r, o
-  rhTy = @value.unwrapAll().computeType r, o
-  # We don't have a more sophisticated subtyping story, so we do the
-  # asymmetric typechecking here manually.
-  throw TypeError 'cannot assign untyped to typed' unless rhTy
-  unless @computedType = unify o.types, lhTy, rhTy
-    throw TypeError "incompatible types in assignment: `#{lhTy}' and `#{rhTy}'"
+  return unless lty = @variable.unwrapAll().computeType r, o
+  rty = @value.unwrapAll().computeType r, o
+  unless @computedType = unify o.types, lty, rty, true
+    rty = 'dyn' unless rty
+    throw TypeError "incompatible types: assigning `#{rty}' to `#{lty}'"
 
 # Accesses on struct types may be typed. If we arrived at this case it's
 # because unwrapAll() didn't manage to unwrap value, i.e. this is a properties
@@ -188,13 +200,13 @@ Value::computeType = (r, o) ->
     @computedType = baseTy
 
 # Functions are be typed if their parameters are typed and all return
-# expression types unify.
+# expression types are compatible.
 Code::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
   # Arriving in this function means that all the parameters typechecked, since
   # this is called after the body has been processed. So we just need to
-  # collect the return expressions and unify their types.
+  # collect the return expressions and compatible their types.
   types = o.types
   rty = null
   rty = unify types, ty.computedType, rty for ty in returnExpressions @body
@@ -229,14 +241,13 @@ Op::computeType = (r, o) ->
     ty2 = tmp
 
   ARITH_OPS = [ '+', '-', '*', '/', '<<', '>>', '>>>', '~', '&', '|' ]
-  primTys   = [ byteTy, shortTy, intTy, uintTy ]
 
   @computedType = if op is '+' and ty1 instanceof PointerType and ty2 in primTys
     ty1
   else if op is '-' and ty1 instanceof PointerType and ty2 instanceof PointerType
     intTy if unify o.types, ty1.base, ty2.base
   else if op in ARITH_OPS and ty1 in primTys and ty2 in primTys
-    intTy
+    unify o.types, ty1, ty2
 
 # Reference gets you a pointer type.
 Ref::computeType = (r, o) ->
@@ -460,7 +471,7 @@ PointerType::view = U32H
 
 # Primitive types as found in C.
 class PrimitiveType
-  constructor: (@size, @debugName, @view) ->
+  constructor: (@size, @debugName, @view, @signed) ->
   lint: (types) -> this
   toString: -> @debugName
 
@@ -469,27 +480,21 @@ class PrimitiveType
 # unit type is used to type free.
 anyPtrTy = new PrimitiveType 0, '*'
 unitTy   = new PrimitiveType 0, '()'
-byteTy   = new PrimitiveType 1, 'byte', HEAP
-shortTy  = new PrimitiveType 2, 'short', I16H
-intTy    = new PrimitiveType 4, 'int', I32H
-uintTy   = new PrimitiveType 4, 'uint', U32H
+byteTy   = new PrimitiveType 1, 'byte',  HEAP, yes
+shortTy  = new PrimitiveType 2, 'short', I16H, yes
+intTy    = new PrimitiveType 4, 'int',   I32H, yes
+uintTy   = new PrimitiveType 4, 'uint',  U32H, no
+primTys  = [ byteTy, shortTy, intTy, uintTy ]
 
-primitiveTypes =
-  byte:  byteTy
-  short: shortTy
-  int:   intTy
-  uint:  uintTy
-
-exports.analyzeTypes = (root) ->
+exports.analyzeTypes = (root, o) ->
   return unless root.containsType DeclareType
+  opts.warn = o.warn
 
-  types = root.foldChildren primitiveTypes, 'collectType', null, immediate: true
+  initialTypes = byte: byteTy, short: shortTy, int: intTy, uint: uintTy
+  types = root.foldChildren initialTypes, 'collectType', null, immediate: true
   types[name] = ty.lint types for name, ty of types
 
-  options =
-    types: types,
-    scope: newTypedScope(null, root, null)
-    crossScope: true
+  options = types: types, scope: newTypedScope(null, root, null), crossScope: true
   root.foldChildren null, 'primeComputeType', 'computeType', options
 
   types
