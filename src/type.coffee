@@ -343,23 +343,37 @@ makeDeref = (base, offset, ty) ->
   new Value ty.view, [new Index new Op '>>', offsetOp, new Literal shiftBy ty.size]
 
 # Generate an inline memcpy.
-inlineMemcpy = (dest, src, n, ret, o) ->
+inlineMemcpy = (dest, src, ty, o) ->
   scope = o.scope
   stmts = []
   # Store the pointer to the struct we're copying to.
-  destPtr = new Value new Literal scope.freeVariable 'dest'
-  stmts.push new Assign destPtr, dest
+  destPtr = new Literal scope.freeVariable 'dest'
+  stmts.push new Assign new Value(destPtr), dest
   # Store the pointer to the struct we're copying from.
-  srcPtr = new Value new Literal scope.freeVariable 'src'
-  stmts.push new Assign srcPtr, src
-  # Loop over the bytes and copy.
-  endVal = new Op '+', destPtr, new Literal n
-  loopBody = new Assign new Value(HEAP, [new Index new Op '++', destPtr, null, true]),
-                        new Value(HEAP, [new Index new Op '++', srcPtr, null, true])
-  memcpy = new While new Op('<', destPtr, endVal)
-  memcpy.addBody new Block [loopBody]
-  stmts.push memcpy
-  stmts.push ret
+  srcPtr = new Literal scope.freeVariable 'src'
+  stmts.push new Assign new Value(srcPtr), src
+  # Unroll the copy loop over the bytes.
+  if ty instanceof StructType
+    # We can do better than byte-by-byte if we're memcpying a struct. We need
+    # to manually set the computedType so they get transformed properly in
+    # Value::transform.
+    for field in ty.fields
+      access = new Access new Literal field.name
+      access.computedField = field
+      fty = field.type
+      destProp = new Value destPtr, [access]
+      destProp.computedType = fty
+      srcProp = new Value srcPtr, [access]
+      srcProp.computedType = fty
+      assign = new Assign destProp, srcProp
+      assign.computedType = fty
+      stmts.push assign
+  else
+    for i in [0...ty.size]
+      offset = new Value new Literal i
+      stmts.push new Assign new Value(HEAP, [new Index new Op '+', new Value(destPtr), offset]),
+                            new Value(HEAP, [new Index new Op '+', new Value(srcPtr), offset])
+  stmts.push new Value destPtr
   new Value new Parens new Block stmts
 
 # Reflect a heap-allocated struct as a JavaScript object literal.
@@ -371,7 +385,7 @@ structLiteral = (v, ty, o) ->
     # Use transform here to get a struct literal out, since we have to compute
     # the offset for the field. We have to manually set the types, kind of
     # gross.
-    access = new Access(new Literal fname)
+    access = new Access new Literal fname
     access.computedField = field
     propValue = new Value ptr, [access]
     propValue.computedType = field.type
@@ -410,7 +424,7 @@ Assign::transform = (o) ->
   lval = @variable
   ty = @computedType
   return unless lval instanceof Deref and ty instanceof StructType
-  new Call MEMCPY, [HEAPV, lval.expr, @value, new Literal ty.size]
+  inlineMemcpy lval.expr, @value, ty, o
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
