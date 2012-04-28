@@ -352,12 +352,20 @@ exports.TypeName = class TypeName extends Base
 exports.PointerType = class PointerType extends Base
   constructor: (@base, @onStack = no) ->
 
-  toString: -> if @onStack then '' else '*' + @base.debugName
+  toString: (lvl = 0) ->
+    if lvl > 0 and @debugName
+      @debugName
+    else
+      if @onStack then '' else '*' + @base.toString(lvl + 1)
 
 exports.ArrowType = class ArrowType extends Base
   constructor: (@params, @ret) ->
 
-  toString: -> "(#{@params.join(', ')}) -> #{@ret}"
+  toString: (lvl = 0) ->
+    if lvl > 0 and @debugName
+      @debugName
+    else
+      "(#{(p.toString(lvl + 1) for p in @params).join(', ')}) -> #{@ret.toString(lvl + 1)}"
 
 exports.StructType = class StructType extends Base
   constructor: (fields) ->
@@ -366,18 +374,24 @@ exports.StructType = class StructType extends Base
     for field, i in fields
       names[field.name] = field
 
-  toString: -> "struct { #{@fields.join(', ')} }"
+  toString: (lvl = 0) ->
+    if lvl > 0 and @debugName
+      @debugName
+    else
+      "struct { #{(f.toString(lvl + 1) for f in @fields).join(', ')} }"
 
 exports.StructField = class StructField extends Base
-
   constructor: (@name, @type, @offset, @usePreviousOffset) ->
 
-  toString: ->
+  toString: (lvl = 0) ->
     offset = if @offset? then @offset else if @usePreviousOffset then '-' else '+'
-    "[#{offset}] #{@name} :: #{@type}"
+    "[#{offset}] #{@name} :: #{@type.toString(lvl + 1)}"
 
 exports.TypeAssign = class TypeAssign extends Base
-  constructor: (@name, @type) ->
+  constructor: (name, type) ->
+    type.debugName ?= name
+    @type = type
+    @name = name
 
   children: ['type']
   isStatement: YES

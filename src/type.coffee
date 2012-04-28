@@ -80,8 +80,6 @@ Code::foldChildren = (r, pre, post, o) ->
 # Collect type synonyms.
 TypeAssign::collectType = (types) ->
   types[@name] = @type
-  # For debugging, types print out the first name they're aliased to.
-  @type.debugName ?= @name
   types
 
 # Sanity check the type and compute the size. Expects synonyms to already have
