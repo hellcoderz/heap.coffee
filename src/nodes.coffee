@@ -369,9 +369,12 @@ exports.StructType = class StructType extends Base
   toString: -> "struct { #{@fields.join(', ')} }"
 
 exports.StructField = class StructField extends Base
-  constructor: (@name, @type) ->
 
-  toString: -> "#{@name}: #{@type}"
+  constructor: (@name, @type, @offset, @usePreviousOffset) ->
+
+  toString: ->
+    offset = if @offset? then @offset else if @usePreviousOffset then '-' else '+'
+    "[#{offset}] #{@name} :: #{@type}"
 
 exports.TypeAssign = class TypeAssign extends Base
   constructor: (@name, @type) ->

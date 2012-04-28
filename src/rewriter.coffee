@@ -105,12 +105,11 @@ class exports.Rewriter
         token[0] = ':='
         token[1] = '='
         tokens.splice i+1, 1
-        return 1
       token[0] = 'IS_TYPE' if token[0] is '::' and (token.spaced or token.newLine) and tokens[i-1]?.spaced
       token[0] = 'TYPE' if token[0] is 'IDENTIFIER' and token[1] is 'type' and
                            tokens[i+1]?[0] is 'IDENTIFIER' and tokens[i+2]?[0] is '='
       if token[0] is 'PARAM_START' and
-         tokens[--i]?[0] is 'IS_TYPE' and tokens[--i]?[0] is ')'
+         tokens[--i][0] is 'IS_TYPE' and tokens[--i][0] is ')'
         # Logic copied from Lexer::tagParameters.
         tokens[i][0] = 'PARAM_END'
         stack = []
@@ -196,6 +195,7 @@ class exports.Rewriter
       @tokens.splice i, 0, @generate 'CALL_END', ')', token[2]
 
     @scanTokens (token, i, tokens) ->
+      return 2 if tokens[i+2]?[0] is 'IS_TYPE'
       tag     = token[0]
       noCall  = yes if tag in ['CLASS', 'IF', 'FOR', 'WHILE']
       [prev, current, next] = tokens[i - 1 .. i + 1]

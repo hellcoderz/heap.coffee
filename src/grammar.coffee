@@ -164,8 +164,14 @@ grammar =
   ]
 
   StructField: [
-    o 'IDENTIFIER IS_TYPE Type',                -> new StructField $1, $3
-    o 'IDENTIFIER IS_TYPE INDENT Type OUTDENT', -> new StructField $1, $4
+    o '[ + ] IDENTIFIER IS_TYPE Type',                     -> new StructField $4, $6
+    o '[ + ] IDENTIFIER IS_TYPE INDENT Type OUTDENT',      -> new StructField $4, $7
+    o '[ - ] IDENTIFIER IS_TYPE Type',                     -> new StructField $4, $6, null, yes
+    o '[ - ] IDENTIFIER IS_TYPE INDENT Type OUTDENT',      -> new StructField $4, $7, null, yes
+    o '[ NUMBER ] IDENTIFIER IS_TYPE Type',                -> new StructField $4, $6, parseInt $2
+    o '[ NUMBER ] IDENTIFIER IS_TYPE INDENT Type OUTDENT', -> new StructField $4, $7, parseInt $2
+    o 'IDENTIFIER IS_TYPE Type',                           -> new StructField $1, $3
+    o 'IDENTIFIER IS_TYPE INDENT Type OUTDENT',            -> new StructField $1, $4
     o 'Comment'
   ]
 

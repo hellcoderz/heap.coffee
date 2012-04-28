@@ -34,7 +34,16 @@ MEMCPY = new Value new Literal 'memcpy'
 opts = { warn: false }
 printWarn = (line) -> process.stderr.write 'warning: ' + line + '\n' if opts.warn
 
-shiftBy = (size) -> Math.log(size) / Math.log(2)
+offsetExpr = (base, offset, size) ->
+  op = if offset isnt 0
+    new Op '+', base, new Value new Literal offset
+  else
+    base
+  shiftBy = Math.log(size) / Math.log(2)
+  if shiftBy isnt 0
+    new Op '>>', op, new Literal shiftBy
+  else
+    op
 
 # This is like @type, but it also looks up the scope chain.
 Scope::typeOf = (name, immediate) ->
@@ -104,11 +113,50 @@ PointerType::lint = (types) ->
 StructType::lint = (types) ->
   return this if @linted
   @linted = true
-  field.type = field.type.lint types for field in @fields
+  fields = @fields
+  field.type = field.type.lint types for field in fields
+  # Make an imaginary first field whose offset and size is 0.
+  prev = offset: 0, type: { size: 0 }
+  # The size of the struct is the its maximum offset + the size of the largest
+  # field with that offset.
   size = 0
-  for field in @fields
-    field.offset = size
-    size += field.type.size
+  for field in fields
+    # An undefined offset tells the typechecker to fill it in from the
+    # previous field. For example,
+    #
+    #   struct { [4] i :: int, j :: int }
+    #
+    # is the same as
+    #
+    #   struct { [4] i :: int, [8] j :: int }
+    #
+    # The first field's offset is 0 if undefined.
+    #
+    # The special form [-] means to use the same offset as the previous
+    # field. For example,
+    #
+    #   struct { i :: int, [-] j :: int }
+    #
+    # is the same as
+    #
+    #   struct { [0] i :: int, [0] j ::
+    #
+    # Since there is an imaginary first field with an offset of 0, you can use
+    # [-] on the first field too to make everything line up.
+    #
+    # The speical form [+] means add the size of the previous field to the
+    # previous field's offset for the current offset. This is the default
+    # behavior when no offset attribute exists.
+    if (offset = field.offset)?
+      throw TypeError "struct field offsets cannot be negative" if offset < 0
+      if offset < prev.offset
+        printWarn "offset of field `#{field.name}' is smaller offset of previous field"
+    else if field.usePreviousOffset
+      field.offset = prev.offset
+    else
+      field.offset = prev.offset + prev.type.size
+    size = s if (s = field.offset + field.type.size) > size
+    prev = field
   @size = size
   this
 
@@ -306,7 +354,9 @@ Assign::primeComputeType = (r, o) ->
   if (fn = @value.unwrapAll()) instanceof Code and
      (name = @variable.unwrapAll()) instanceof Literal and name.isAssignable() and
      (ty = o.scope.typeOf name.value) instanceof ArrowType
-    # Remember the parameter and return types on the right-hand side.
+    # Remember the parameter and return types on the right-hand side. The
+    # return type is only used to propagate the types further, if it is
+    # another arrow type.
     fn.paramTypes ?= ty.params
     fn.returnType ?= ty.ret
   return
@@ -352,11 +402,7 @@ DeclareType::primeComputeType = (r, o) ->
 # Dereference something in a heap view.
 makeDeref = (base, offset, ty) ->
   throw TypeError "unknown view on type `#{ty}'" unless ty.view
-  if offset isnt 0
-    offsetOp = new Op '+', base, new Value new Literal offset
-  else
-    offsetOp = base
-  new Value ty.view, [new Index new Op '>>', offsetOp, new Literal shiftBy ty.size]
+  new Value ty.view, [new Index offsetExpr base, offset, ty.size]
 
 # Generate an inline memcpy.
 inlineMemcpy = (dest, src, ty, o) ->
@@ -459,7 +505,7 @@ Op::transform = (o) ->
     else if op is '-' and (ty = @first.computedType) instanceof PointerType
       this.transform = null
       # Typechecking already ensures that @second.computedType is ty.
-      new Op '>>', this, new Literal(shiftBy ty.base.size)
+      offsetExpr this, 0, ty.base.size
 
 # TODO
 Ref::transform = (o) ->
