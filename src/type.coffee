@@ -6,13 +6,14 @@
 # !! THIS IS NOT A GOOD TYPE SYSTEM !!
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #
-# Only local variables may be typed.
+# Only local variables may be typed and types are file-local. To import
+# external typed stuff unsafe casts are required.
 #
 
 {Scope} = require './scope'
 {Base, Parens, Block, Value, Literal, Op, Assign,
  Code, Index, Access, Call, Return, Obj, While
- TypeAssign, DeclareType, Ref, Deref,
+ TypeAssign, DeclareType,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend} = require './helpers'
 
@@ -205,6 +206,9 @@ unify = (types, lty, rty, assign) ->
       return lty
   null
 
+# Is this Op a dereference?
+Op::isDeref = -> not @second and @operator is '*'
+
 # By default, computeType returns undefined, which means dynamic.
 Base::computeType = (r, o) ->
 
@@ -266,7 +270,6 @@ Op::computeType = (r, o) ->
 
   op  = @operator
 
-  # Typed unary operations like dereferencing are separate nodes.
   if @isUnary()
     first = @first.unwrapAll()
     return @computedType = if op is 'new' and (ty1 = o.types[first.value])
@@ -276,6 +279,14 @@ Op::computeType = (r, o) ->
       throw TypeError 'cannot free non-pointer type' unless ty1 instanceof PointerType
       throw TypeError 'cannot free on-stack variables' if ty1.onStack
       unitTy
+    else if op is '&' and (ty1 = first.computeType r, o)
+      throw TypeError "taking reference of an untyped expression:\n#{@first}" unless ty1
+      throw TypeError "taking reference of a function type" if ty1 instanceof ArrowType1
+      new PointerType ty1
+    else if op is '*' and (ty1 = first.computeType r, o)
+      throw TypeError "dereferencing an untyped expression:\n#{@first}" unless ty1
+      throw TypeError "dereferencing a non-pointer type" unless ty1 instanceof PointerType and not ty1.onStack
+      ty1.base
 
   ty1 = @first.unwrapAll().computeType r, o
   ty2 = @second.unwrapAll().computeType r, o
@@ -299,24 +310,6 @@ Op::computeType = (r, o) ->
     ty1
   else if op in ARITH_OPS and ty1 in primTys and ty2 in primTys
     unify o.types, ty1, ty2
-
-# Reference gets you a pointer type.
-Ref::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  ty = @expr.unwrapAll().computeType r, o
-  throw TypeError "taking reference of an untyped expression:\n#{@expr}" unless ty
-  throw TypeError "taking reference of a function type" if ty instanceof ArrowType
-  @computedType = new PointerType ty
-
-# Dereferencing gets the base type of the pointer type.
-Deref::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  ty = @expr.unwrapAll().computeType r, o
-  throw TypeError "dereferencing an untyped expression:\n#{@expr}" unless ty
-  throw TypeError "dereferencing a non-pointer type" unless ty instanceof PointerType and not ty.onStack
-  @computedType = ty.base
 
 # Gather return expressions.
 returnExpressions = (body) ->
@@ -462,7 +455,7 @@ Value::transform = (o) ->
   return unless @computedType and props.length
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
-  v = if (inner = @base.unwrapAll()) instanceof Deref then inner.expr else @base
+  v = if (inner = @base.unwrapAll()).isDeref?() then inner.first else @base
   cumulativeOffset = 0;
   for prop in props
     field = prop.computedField
@@ -483,19 +476,29 @@ Value::transform = (o) ->
 Assign::transform = (o) ->
   lval = @variable
   ty = @computedType
-  return unless lval instanceof Deref and ty instanceof StructType
-  inlineMemcpy lval.expr, @value, ty, o
+  return unless lval.isDeref?() and ty instanceof StructType
+  inlineMemcpy lval.first, @value, ty, o
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
 Op::transform = (o) ->
+  return unless @computedType
   op = @operator
-  if op is 'new' and ty = @computedType
-    m = if ty.onStack then STACKV else HEAPV
-    new Call MALLOC, [m, new Value new Literal ty.base.size]
-  else if op is 'delete' and @first.computedType
-    new Call FREE, [HEAPV, @first]
-  else if @computedType and not @isUnary()
+  if @isUnary()
+    if op is 'new' and ty = @computedType
+      m = if ty.onStack then STACKV else HEAPV
+      new Call MALLOC, [m, new Value new Literal ty.base.size]
+    else if op is 'delete'
+      new Call FREE, [HEAPV, @first]
+    else if op is '&'
+      # TODO
+      @first
+    else if op is '*'
+      # This is only called when this deref is _not_ the base of a struct
+      # access, as in struct accesses, dereferencing is the same as not
+      # dereferencing, since . is extended to work like -> in C.
+      makeDeref @first, 0, @first.computedType
+  else
     if op is '+' and (ty = @first.computedType) instanceof PointerType
       new Op '+', @first, new Op('*', @second, new Literal ty.base.size)
     else if op is '+' and (ty = @second.computedType) instanceof PointerType
@@ -504,16 +507,6 @@ Op::transform = (o) ->
       this.transform = null
       # Typechecking already ensures that @second.computedType is ty.
       offsetExpr this, 0, ty.base.size
-
-# TODO
-Ref::transform = (o) ->
-  @expr
-
-# This is only called when this deref is _not_ the base of a struct access, as
-# in struct accesses, dereferencing is the same as not dereferencing, since
-# . is extended to work like -> in C.
-Deref::transform = (o) ->
-  makeDeref @expr, 0, @expr.computedType
 
 # Pointers are 4-byte aligned for now.
 PointerType::view = U32H

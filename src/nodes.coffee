@@ -423,19 +423,6 @@ exports.DeclareType = class DeclareType extends Base
   toString: (idt = '') ->
     '\n' + idt + @constructor.name + @variable + '\n' + idt + TAB + @type
 
-exports.Ref = class Ref extends Base
-  constructor: (@expr) ->
-
-  children: ['expr']
-
-  compileNode: (o) ->
-    throw new Error "address-of not implemented"
-
-exports.Deref = class Deref extends Base
-  constructor: (@expr) ->
-
-  children: ['expr']
-
 exports.Cast = class Cast extends Base
   constructor: (@expr, @type) ->
 
