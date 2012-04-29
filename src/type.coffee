@@ -279,6 +279,12 @@ Op::computeType = (r, o) ->
       throw TypeError 'cannot free non-pointer type' unless ty1 instanceof PointerType
       throw TypeError 'cannot free on-stack variables' if ty1.onStack
       unitTy
+    else if op is 'sizeof'
+      ty1 = o.types[first.value]
+      throw TypeError "cannot determine size of unknown type `#{first.value}'" unless ty1
+      # Replace the operand with the type itself.
+      @first = ty1
+      intTy
     else if op is '&' and (ty1 = first.computeType r, o)
       throw TypeError "taking reference of an untyped expression:\n#{@first}" unless ty1
       throw TypeError "taking reference of a function type" if ty1 instanceof ArrowType1
@@ -490,6 +496,8 @@ Op::transform = (o) ->
       new Call MALLOC, [m, new Value new Literal ty.base.size]
     else if op is 'delete'
       new Call FREE, [HEAPV, @first]
+    else if op is 'sizeof'
+      new Literal @first.size
     else if op is '&'
       # TODO
       @first

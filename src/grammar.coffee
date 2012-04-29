@@ -588,11 +588,12 @@ grammar =
   # -type rule, but in order to make the precedence binding possible, separate
   # rules are necessary.
   Operation: [
-    o 'UNARY Expression',                       -> new Op $1 , $2
-    o '*     Expression',                      (-> new Op '*', $2), prec: 'UNARY'
-    o '&     Expression',                      (-> new Op '&', $2), prec: 'UNARY'
-    o '-     Expression',                      (-> new Op '-', $2), prec: 'UNARY'
-    o '+     Expression',                      (-> new Op '+', $2), prec: 'UNARY'
+    o 'UNARY  Expression',                      -> new Op $1 , $2
+    o '*      Expression',                     (-> new Op '*', $2), prec: 'UNARY'
+    o '&      Expression',                     (-> new Op '&', $2), prec: 'UNARY'
+    o '-      Expression',                     (-> new Op '-', $2), prec: 'UNARY'
+    o '+      Expression',                     (-> new Op '+', $2), prec: 'UNARY'
+    o 'SIZEOF Identifier',                     (-> new Op 'sizeof', $2), prec: 'UNARY'
 
     o '-- SimpleAssignable',                    -> new Op '--', $2
     o '++ SimpleAssignable',                    -> new Op '++', $2

@@ -561,7 +561,7 @@ JS_KEYWORDS = [
 # CoffeeScript-only keywords.
 COFFEE_KEYWORDS = [
   'undefined', 'then', 'unless', 'until', 'loop', 'of', 'by', 'when',
-  'struct', 'as'
+  'struct', 'as', 'sizeof'
 ]
 
 COFFEE_ALIAS_MAP =
