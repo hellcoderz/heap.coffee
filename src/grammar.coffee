@@ -593,7 +593,7 @@ grammar =
     o '&      Expression',                     (-> new Op '&', $2), prec: 'UNARY'
     o '-      Expression',                     (-> new Op '-', $2), prec: 'UNARY'
     o '+      Expression',                     (-> new Op '+', $2), prec: 'UNARY'
-    o 'SIZEOF Identifier',                     (-> new Op 'sizeof', $2), prec: 'UNARY'
+    o 'SIZEOF Type',                           (-> new Op 'sizeof', $2), prec: 'UNARY'
 
     o '-- SimpleAssignable',                    -> new Op '--', $2
     o '++ SimpleAssignable',                    -> new Op '++', $2
@@ -621,9 +621,9 @@ grammar =
       else
         new Op $2, $1, $3
 
-    o 'SimpleAssignable := Expression',         -> new Assign new Op('*', $1), $3, $2
+    o 'SimpleAssignable := Expression',         -> new Assign new Op('*', $1), $3
     o 'SimpleAssignable :=
-       INDENT Expression OUTDENT',              -> new Assign new Op('*', $1), $4, $2
+       INDENT Expression OUTDENT',              -> new Assign new Op('*', $1), $4
     o 'SimpleAssignable COMPOUND_ASSIGN
        Expression',                             -> new Assign $1, $3, $2
     o 'SimpleAssignable COMPOUND_ASSIGN

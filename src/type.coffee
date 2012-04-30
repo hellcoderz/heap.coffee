@@ -19,14 +19,13 @@
 
 # HEAP is the byte-sized view.
 HEAP   = new Literal 'H'
-HEAPV  = new Value HEAP
-STACK  = new Literal 'S'
-STACKV = new Value STACK
 # Views of other sizes.
 I16H   = new Literal 'I16H'
 U16H   = new Literal 'U16H'
 I32H   = new Literal 'I32H'
 U32H   = new Literal 'U32H'
+# The frame pointer.
+FP     = new Literal 'FP'
 MALLOC = new Value new Literal 'malloc'
 FREE   = new Value new Literal 'free'
 MEMCPY = new Value new Literal 'memcpy'
@@ -45,6 +44,9 @@ offsetExpr = (base, offset, size) ->
     new Op '>>', op, new Literal shiftBy
   else
     op
+
+multExpr = (base, size) ->
+  new Parens new Op '<<', base, new Literal (Math.log(size) / Math.log(2))
 
 # This is like @type, but it also looks up the scope chain.
 Scope::typeOf = (name, immediate) ->
@@ -71,12 +73,9 @@ Base::foldChildren = (r, pre, post, o) ->
 
   if post and typeof @[post] is 'function' then @[post](r, o) else r
 
-Block::foldChildren = (r, pre, post, o) ->
-  super(r, pre, post, (extend {}, o))
-
 Code::foldChildren = (r, pre, post, o) ->
   return r unless o.crossScope
-  super(r, pre, post, o)
+  super(r, pre, post, (extend {}, o))
 
 # Collect type synonyms.
 TypeAssign::collectType = (types) ->
@@ -182,7 +181,7 @@ unify = (types, lty, rty, assign) ->
     # If we're assigning, *any can be assigned to any pointer and keep the
     # type of the original pointer.
     return lty if assign and not rty.base
-    return new PointerType unify types, lty.base, rty.base
+    return new PointerType unify types, lty.base, rty.base, assign
   # Two function types are compatible if their parameters and return types are
   # compatible.
   if lty instanceof ArrowType and rty instanceof ArrowType
@@ -191,9 +190,8 @@ unify = (types, lty, rty, assign) ->
     return unless lptys.length is rptys.length
     ptys = []
     for lpty, i in lptys
-      return unless pty = unify types, lpty, rptys[i]
-      ptys.push pty
-    return new ArrowType ptys, ret if ret = unify types, lty.ret, rty.ret
+      ptys.push unify types, lpty, rptys[i], assign
+    return new ArrowType ptys, unify(types, lty.ret, rty.ret, assign)
   if lty instanceof PointerType and rty in primTys
     printWarn "conversion from `#{rty}' to pointer without cast"
     return lty
@@ -247,6 +245,12 @@ Assign::computeType = (r, o) ->
   if lty instanceof PointerType and value instanceof Literal and value.value is '0'
     value.computedType = anyPtrTy
   rty = value.computedType
+  # Handle pointer arithmetic complex assignments.
+  context = @context
+  if (context is '+=' or context is '-=') and lty instanceof PointerType and rty in primTys
+    return @computedType = lty
+  else if context is '-=' and lty instanceof PointerType and rty instanceof PointerType
+    return @computedType = intTy if unify o.types, lty.base, rty.base
   unless @computedType = unify o.types, lty, rty, true
     throw TypeError "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
 
@@ -276,8 +280,11 @@ Code::computeType = (r, o) ->
   # this is called after the body has been processed. So we just need to
   # collect the return expressions and compatible their types.
   types = o.types
-  rty = null
-  rty = unify types, rexpr.computedType, rty for rexpr in returnExpressions @body
+  for rexpr in returnExpressions @body
+    unless rty
+      rty = rexpr.unwrapAll().computedType
+    else
+      rty = unify types, rexpr.unwrapAll().computedType, rty
   @computedType = new ArrowType @paramTypes, rty
 
 # Allocations, pointer arithmetic, and foldably constant arithmetic
@@ -299,10 +306,9 @@ Op::computeType = (r, o) ->
       throw TypeError 'cannot free on-stack variables' if ty1.onStack
       unitTy
     else if op is 'sizeof'
-      ty1 = o.types[first.value]
-      throw TypeError "cannot determine size of type `#{first.value}'" unless ty1
+      ty1 = @first = @first.lint o.types
+      throw TypeError "cannot determine size of type `#{ty1}'" unless ty1.size
       # Replace the operand with the type itself.
-      @first = ty1
       intTy
     else if op is '&' and (ty1 = first.computedType)
       throw TypeError "taking reference of an untyped expression:\n#{@first}" unless ty1
@@ -325,7 +331,7 @@ Op::computeType = (r, o) ->
   ARITH_OPS   = [ '+', '-', '*', '/' ]
   BITWISE_OPS = [ '<<', '>>', '>>>', '~', '&', '|' ]
 
-  @computedType = if op is '+' and ty1 instanceof PointerType and ty2 in primTys
+  @computedType = if (op is '+' or op is '-') and ty1 instanceof PointerType and ty2 in primTys
     ty1
   else if op is '-' and ty1 instanceof PointerType and ty2 instanceof PointerType
     intTy if unify o.types, ty1.base, ty2.base
@@ -341,8 +347,13 @@ returnExpressions = (body) ->
   exprs = body.expressions
   body.foldChildren [exprs[exprs.length - 1]], 'returnExpression', null, {}
 
+nullLit = new Literal 'null'
+nullLit.computedType = anyPtrTy
+nullExpr = new Value nullLit
+
 Return::returnExpression = (exprs, o) ->
-  exprs.push @expression
+  # @expression could be undefined, which means it's returning null.
+  exprs.push @expression or nullExpr
   exprs
 
 # Add parameter and return types to the typed scope.
@@ -385,6 +396,7 @@ Code::primeComputeType = (r, o) ->
   rty = @returnType
   if rty instanceof ArrowType
     for rexpr in returnExpressions @body when rexpr instanceof Code
+      rexpr = rexpr.unwrapAll()
       rexpr.paramTypes ?= rty.params
       rexpr.returnType ?= rty.ret
   # Make a new scope and declare parameter types.
@@ -501,8 +513,17 @@ Value::transform = (o) ->
 Assign::transform = (o) ->
   lval = @variable
   ty = @computedType
-  return unless lval.isDeref?() and ty instanceof StructType
-  inlineMemcpy lval.first, @value, ty, o
+  context = @context
+  if (context is '+=' or context is '-=')
+    lty = @variable.unwrapAll().computedType
+    rty = @value.unwrapAll().computedType
+    if lty instanceof PointerType and rty in primTys
+      @value = multExpr @value, lty.base.size
+      return this
+    else if lty instanceof PointerType and rty instanceof PointerType
+      return offsetExpr this, 0, lty.base.size
+  else if lval.isDeref?() and ty instanceof StructType
+    inlineMemcpy lval.first, @value, ty, o
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
@@ -511,10 +532,10 @@ Op::transform = (o) ->
   op = @operator
   if @isUnary()
     if op is 'new' and ty = @computedType
-      m = if ty.onStack then STACKV else HEAPV
-      new Call MALLOC, [m, new Value new Literal ty.base.size]
+      # TODO when ty.onStack
+      new Call MALLOC, [new Value new Literal ty.base.size]
     else if op is 'delete'
-      new Call FREE, [HEAPV, @first]
+      new Call FREE, [@first]
     else if op is 'sizeof'
       new Literal @first.size
     else if op is '&'
@@ -526,14 +547,16 @@ Op::transform = (o) ->
       # dereferencing, since . is extended to work like -> in C.
       makeDeref @first, 0, @first.computedType
   else
-    if op is '+' and (ty = @first.computedType) instanceof PointerType
-      new Op '+', @first, new Op('*', @second, new Literal ty.base.size)
-    else if op is '+' and (ty = @second.computedType) instanceof PointerType
-      new Op '+', new Op('*', @first, new Literal ty.base.size), @second
-    else if op is '-' and (ty = @first.computedType) instanceof PointerType
+    ty1 = @first.computedType
+    ty2 = @second.computedType
+    if (op is '+' or op is '-') and ty1 instanceof PointerType and ty2 in primTys
+      new Op op, @first, multExpr(@second, ty1.base.size)
+    else if (op is '+' or op is '-') and ty1 in primTys and ty2 instanceof PointerType
+      new Op op, multExpr(@first, ty2.base.size), @second
+    else if op is '-' and ty1 instanceof PointerType
       this.transform = null
-      # Typechecking already ensures that @second.computedType is ty.
-      offsetExpr this, 0, ty.base.size
+      # Typechecking already ensures that ty2 is ty1.
+      offsetExpr this, 0, ty1.base.size
 
 # Pointers are 4-byte aligned for now.
 PointerType::view = U32H
@@ -554,7 +577,12 @@ uintTy   = new PrimitiveType 4, 'uint',  U32H, no
 primTys  = [ byteTy, shortTy, intTy, uintTy ]
 
 exports.analyzeTypes = (root, o) ->
-  return unless root.containsType DeclareType
+  usesTypes = no
+  root.traverseChildren yes, (node) ->
+    if node instanceof DeclareType
+      usesTypes = yes
+      return no
+  return unless usesTypes
   opts.warn = o.warn
 
   initialTypes = any: null, byte: byteTy, short: shortTy, int: intTy, uint: uintTy
