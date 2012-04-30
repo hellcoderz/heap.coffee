@@ -15,7 +15,7 @@
  Code, Index, Access, Call, Return, Obj, While
  TypeAssign, DeclareType, Cast,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
-{flatten, extend} = require './helpers'
+{flatten, extend, tystr} = require './helpers'
 
 # HEAP is the byte-sized view.
 HEAP   = new Literal 'H'
@@ -95,8 +95,8 @@ TypeName::lint = (types) ->
   throw TypeError "circular type synonym: #{@name}" if @linting
   return @linted if @linted
   @linting = true
-  throw TypeError "cannot resolve type `#{@name}'" unless ty = types[@name]
-  linted = ty.lint types
+  throw TypeError "cannot resolve type `#{@name}'" unless @name of types
+  linted = types[@name]?.lint types
   delete @linting
   @linted = linted
 
@@ -169,19 +169,20 @@ ArrowType::lint = (types) ->
     params[i] = ty.lint types
   this
 
-# Are two types compatible, i.e. can rty be assigned into lty?
+# Unify two types, if possible, into a single type. If assign is true, then
+# this behaves asymmetrically for pointer types and automatic promotions of
+# primitive types.
 unify = (types, lty, rty, assign) ->
   # Compatibility is reflexive.
   return lty if lty is rty
-  # If either side is dynamic, the expression is untypable.
+  # If the left side is dynamic, the entire expression is dynamic.
   return unless lty and rty
-  # A null or malloc or something is compatible with any pointer type.
-  return lty if lty instanceof PointerType and rty is anyPtrTy
-  return rty if rty instanceof PointerType and lty is anyPtrTy
   # Two pointer types are compatible iff their bases are compatible.
   if lty instanceof PointerType and rty instanceof PointerType
-    base = unify types, lty.base, rty.base
-    return new PointerType base if base
+    # If we're assigning, *any can be assigned to any pointer and keep the
+    # type of the original pointer.
+    return lty if assign and not rty.base
+    return new PointerType unify types, lty.base, rty.base
   # Two function types are compatible if their parameters and return types are
   # compatible.
   if lty instanceof ArrowType and rty instanceof ArrowType
@@ -193,6 +194,12 @@ unify = (types, lty, rty, assign) ->
       return unless pty = unify types, lpty, rptys[i]
       ptys.push pty
     return new ArrowType ptys, ret if ret = unify types, lty.ret, rty.ret
+  if lty instanceof PointerType and rty in primTys
+    printWarn "conversion from `#{rty}' to pointer without cast"
+    return lty
+  if lty in primTys and rty instanceof PointerType
+    printWarn "conversion from pointer to `#{lty}' without cast"
+    return lty
   # Primitive types follow C-like promotion rules.
   if lty in primTys and rty in primTys
     # If we're assigning, return the left type, else return the wider primitive.
@@ -232,11 +239,16 @@ Literal::computeType = (r, o) ->
 Assign::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  return unless lty = @variable.unwrapAll().computeType r, o
-  rty = @value.unwrapAll().computeType r, o
+  return unless lty = @variable.unwrapAll().computedType
+  # As a convenience if the left-hand side is a pointer and the right-hand
+  # side is 0, replace the right-hand side with null, which has the type *any
+  # to suppress int-to-pointer warnings.
+  value = @value.unwrapAll()
+  if lty instanceof PointerType and value instanceof Literal and value.value is '0'
+    value.computedType = anyPtrTy
+  rty = value.computedType
   unless @computedType = unify o.types, lty, rty, true
-    rty = 'dyn' unless rty
-    throw TypeError "incompatible types: assigning `#{rty}' to `#{lty}'"
+    throw TypeError "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
 
 # Accesses on struct types may be typed. If we arrived at this case it's
 # because unwrapAll() didn't manage to unwrap value, i.e. this is a properties
@@ -244,7 +256,7 @@ Assign::computeType = (r, o) ->
 Value::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  if baseTy = @base.unwrapAll().computeType r, o
+  if baseTy = @base.unwrapAll().computedType
     for prop in @properties
       baseTy = baseTy.base if baseTy instanceof PointerType
       return unless baseTy instanceof StructType
@@ -265,7 +277,7 @@ Code::computeType = (r, o) ->
   # collect the return expressions and compatible their types.
   types = o.types
   rty = null
-  rty = unify types, ty.computedType, rty for ty in returnExpressions @body
+  rty = unify types, rexpr.computedType, rty for rexpr in returnExpressions @body
   @computedType = new ArrowType @paramTypes, rty
 
 # Allocations, pointer arithmetic, and foldably constant arithmetic
@@ -278,30 +290,31 @@ Op::computeType = (r, o) ->
 
   if @isUnary()
     first = @first.unwrapAll()
-    return @computedType = if op is 'new' and (ty1 = o.types[first.value])
-      throw TypeError 'cannot allocate type with size 0' unless ty1.size
+    return @computedType = if op is 'new' and first.value of o.types
+      ty1 = o.types[first.value]
+      throw TypeError 'cannot allocate type with size 0' unless ty1?.size
       new PointerType ty1
-    else if op is 'delete' and (ty1 = first.computeType r, o)
+    else if op is 'delete' and (ty1 = first.computedType)
       throw TypeError 'cannot free non-pointer type' unless ty1 instanceof PointerType
       throw TypeError 'cannot free on-stack variables' if ty1.onStack
       unitTy
     else if op is 'sizeof'
       ty1 = o.types[first.value]
-      throw TypeError "cannot determine size of unknown type `#{first.value}'" unless ty1
+      throw TypeError "cannot determine size of type `#{first.value}'" unless ty1
       # Replace the operand with the type itself.
       @first = ty1
       intTy
-    else if op is '&' and (ty1 = first.computeType r, o)
+    else if op is '&' and (ty1 = first.computedType)
       throw TypeError "taking reference of an untyped expression:\n#{@first}" unless ty1
       throw TypeError "taking reference of a function type" if ty1 instanceof ArrowType1
       new PointerType ty1
-    else if op is '*' and (ty1 = first.computeType r, o)
+    else if op is '*' and (ty1 = first.computedType)
       throw TypeError "dereferencing an untyped expression:\n#{@first}" unless ty1
       throw TypeError "dereferencing a non-pointer type" unless ty1 instanceof PointerType and not ty1.onStack
       ty1.base
 
-  ty1 = @first.unwrapAll().computeType r, o
-  ty2 = @second.unwrapAll().computeType r, o
+  ty1 = @first.unwrapAll().computedType
+  ty2 = @second.unwrapAll().computedType
 
   # Commute.
   if ty2 instanceof PointerType
@@ -531,24 +544,22 @@ class PrimitiveType
   lint: (types) -> this
   toString: -> @debugName
 
-# The any pointer type, or unity type are not exported to the language, but
-# used internally. The any pointer type is used to typecheck null, and the
-# unit type is used to type free.
-anyPtrTy = new PrimitiveType 0, '*'
-unitTy   = new PrimitiveType 0, '()'
+# Cache this for typing null values.
+anyPtrTy = new PointerType null
 byteTy   = new PrimitiveType 1, 'byte',  HEAP, yes
 shortTy  = new PrimitiveType 2, 'short', I16H, yes
 intTy    = new PrimitiveType 4, 'int',   I32H, yes
 uintTy   = new PrimitiveType 4, 'uint',  U32H, no
+# Sized primitive types.
 primTys  = [ byteTy, shortTy, intTy, uintTy ]
 
 exports.analyzeTypes = (root, o) ->
   return unless root.containsType DeclareType
   opts.warn = o.warn
 
-  initialTypes = byte: byteTy, short: shortTy, int: intTy, uint: uintTy
+  initialTypes = any: null, byte: byteTy, short: shortTy, int: intTy, uint: uintTy
   types = root.foldChildren initialTypes, 'collectType', null, immediate: true
-  types[name] = ty.lint types for name, ty of types
+  types[name] = ty.lint types for name, ty of types when ty
 
   options = types: types, scope: newTypedScope(null, root, null), crossScope: true
   root.foldChildren null, 'primeComputeType', 'computeType', options

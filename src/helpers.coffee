@@ -54,3 +54,7 @@ exports.del = (obj, key) ->
 
 # Gets the last item of an array(-like) object.
 exports.last = (array, back) -> array[array.length - (back or 0) - 1]
+
+# Returns the name of a type. Undefined means the dynamic type 'any'.
+exports.tystr = (ty, lvl) ->
+  if ty then ty.toString(lvl) else 'any'

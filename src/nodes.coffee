@@ -7,7 +7,7 @@
 {RESERVED, STRICT_PROSCRIBED} = require './lexer'
 
 # Import the helpers we plan to use.
-{compact, flatten, extend, merge, del, starts, ends, last} = require './helpers'
+{compact, flatten, extend, merge, del, starts, ends, last, tystr} = require './helpers'
 
 exports.extend = extend  # for parser
 
@@ -356,7 +356,7 @@ exports.PointerType = class PointerType extends Base
     if lvl > 0 and @debugName
       @debugName
     else
-      if @onStack then '' else '*' + @base.toString(lvl + 1)
+      if @onStack then '' else '*' + tystr(@base, lvl + 1)
 
 exports.ArrowType = class ArrowType extends Base
   constructor: (@params, @ret) ->
@@ -365,7 +365,7 @@ exports.ArrowType = class ArrowType extends Base
     if lvl > 0 and @debugName
       @debugName
     else
-      "(#{(p.toString(lvl + 1) for p in @params).join(', ')}) -> #{@ret.toString(lvl + 1)}"
+      "(#{(tystr(p, lvl + 1) for p in @params).join(', ')}) -> #{tystr(@ret, lvl + 1)}"
 
 exports.StructType = class StructType extends Base
   constructor: (fields) ->
@@ -385,7 +385,7 @@ exports.StructField = class StructField extends Base
 
   toString: (lvl = 0) ->
     offset = if @offset? then @offset else if @usePreviousOffset then '-' else '+'
-    "[#{offset}] #{@name} :: #{@type.toString(lvl + 1)}"
+    "[#{offset}] #{@name} :: #{tystr(@type, lvl + 1)}"
 
 exports.TypeAssign = class TypeAssign extends Base
   constructor: (name, type) ->
