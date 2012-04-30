@@ -429,7 +429,7 @@ exports.Cast = class Cast extends Base
   children: ['expr', 'type']
 
   compileNode: (o) ->
-    throw new Error 'cast not implemented'
+    @expr.compile o
 
   toString: (idt = '') ->
     '\n' + idt + @constructor.name + @expr + '\n' + idt + TAB + @type

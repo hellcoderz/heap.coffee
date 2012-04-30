@@ -13,7 +13,7 @@
 {Scope} = require './scope'
 {Base, Parens, Block, Value, Literal, Op, Assign,
  Code, Index, Access, Call, Return, Obj, While
- TypeAssign, DeclareType,
+ TypeAssign, DeclareType, Cast,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend} = require './helpers'
 
@@ -211,6 +211,12 @@ Op::isDeref = -> not @second and @operator is '*'
 
 # By default, computeType returns undefined, which means dynamic.
 Base::computeType = (r, o) ->
+
+# Casting coerces the expression to a certain type.
+Cast::computeType = (r, o) ->
+  return @computedType if @typeCached
+  @typeCached = true
+  @computedType = @type.lint o.types
 
 # Simple identifiers and integer literals may be typed.
 Literal::computeType = (r, o) ->
