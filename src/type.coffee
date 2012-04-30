@@ -234,6 +234,7 @@ Literal::computeType = (r, o) ->
   else if @isSimpleNumber()
     intTy
 
+# Assignments do asymmetric type unification.
 Assign::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
@@ -271,7 +272,7 @@ Value::computeType = (r, o) ->
       baseTy = field.type
     @computedType = baseTy
 
-# Functions are be typed if their parameters are typed and all return
+# Functions may be typed if their parameters are typed and all return
 # expression types are compatible.
 Code::computeType = (r, o) ->
   return @computedType if @typeCached
@@ -286,6 +287,26 @@ Code::computeType = (r, o) ->
     else
       rty = unify types, rexpr.unwrapAll().computedType, rty
   @computedType = new ArrowType @paramTypes, rty
+
+# Applications may be typed if the function is typed and the parameter types
+# unify asymmetrically.
+Call::computeType = (r, o) ->
+  return @computedType if @typeCached
+  @typeCached = true
+  f = @variable.unwrapAll()
+  return unless fty = f.computedType
+  throw TypeError "calling a non-function type `#{fty}'" unless fty instanceof ArrowType
+  paramTys = fty.params
+  args = @args
+  types = o.types
+  for pty, i in fty.params
+    # If fewer arguments than there are parameters were passed, this will be
+    # `undefined` and interpreted as the type `any`.
+    aty = args[i]?.computedType
+    if pty and not unify types, pty, aty, true
+      throw TypeError "incompatible types: passing arg `#{tystr(aty)}' to param `#{tystr(pty)}'"
+  # If all the arguments checked, the call gets the return type.
+  @computedType = fty.ret
 
 # Allocations, pointer arithmetic, and foldably constant arithmetic
 # expressions may be typed.
