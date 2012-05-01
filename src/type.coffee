@@ -11,27 +11,28 @@
 #
 
 {Scope} = require './scope'
-{Base, Parens, Block, Value, Literal, Op, Assign,
- Code, Index, Access, Call, Return, Obj, While
+{Base, Parens, Block, Value, Literal, Op, Assign, Try,
+ Code, Index, Access, Call, Return, Obj, While, Comment,
  TypeAssign, DeclareType, Cast,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend, tystr} = require './helpers'
 
 # HEAP is the byte-sized view.
-HEAP   = new Literal 'H'
+HEAP   = new Literal '_I8'
 # Views of other sizes.
-I16H   = new Literal 'I16H'
-U16H   = new Literal 'U16H'
-I32H   = new Literal 'I32H'
-U32H   = new Literal 'U32H'
+U8H    = new Literal '_U8'
+I16H   = new Literal '_I16'
+U16H   = new Literal '_U16'
+I32H   = new Literal '_I32'
+U32H   = new Literal '_U32'
 # The stack pointer.
-SP     = new Value new Literal 'SP'
+SP     = new Value new Literal '_SP'
 MALLOC = new Value new Literal 'malloc'
 FREE   = new Value new Literal 'free'
 MEMCPY = new Value new Literal 'memcpy'
 
 # Global option for if we should print warnings.
-opts = { warn: false }
+opts = { warn: false, unsafe: false }
 printWarn = (line) -> process.stderr.write 'warning: ' + line + '\n' if opts.warn
 
 offsetExpr = (base, offset, size) ->
@@ -49,8 +50,13 @@ offsetExpr = (base, offset, size) ->
 stackOffsetExpr = (base, offset) ->
   offsetExpr base, offset, 1
 
+# Multiply by a size. If the size is a power of 2, use left shift.
 multExpr = (base, size) ->
-  new Parens new Op '<<', base, new Literal (Math.log(size) / Math.log(2))
+  # Is size a power of 2?
+  if size and ((size & (size - 1)) is 0)
+    new Parens new Op '<<', base, new Value new Literal (Math.log(size) / Math.log(2))
+  else
+    new Op '*', base, new Value new Literal size
 
 class Binding
   constructor: (@type) ->
@@ -344,9 +350,11 @@ Op::computeType = (r, o) ->
       throw TypeError "taking reference of a function type" if ty1 instanceof ArrowType
       throw TypeError "taking reference of non-assignable" unless first.isAssignable()
       # Can't take references of upvars.
-      if first instanceof Literalo
-        throw TypeError "taking reference of upvar" unless o.scope.check name, true
-        putOnStack o.scope, first.value
+      if first instanceof Literal
+        name = first.value
+        unless o.scope.check name, true
+          throw TypeError "taking reference of non-local or undefined variable `#{name}'"
+        putOnStack o.scope, name
       new PointerType ty1
     else if op is '*' and (ty1 = first.computedType)
       throw TypeError "dereferencing an untyped expression:\n#{@first}" unless ty1
@@ -383,13 +391,11 @@ returnExpressions = (body) ->
   exprs = body.expressions
   body.foldChildren [exprs[exprs.length - 1]], 'returnExpression', null, {}
 
-nullLit = new Literal 'null'
-nullLit.computedType = anyPtrTy
-nullExpr = new Value nullLit
+undefExpr = new Value new Literal 'undefined'
 
 Return::returnExpression = (exprs, o) ->
   # @expression could be undefined, which means it's returning null.
-  exprs.push @expression or nullExpr
+  exprs.push @expression or undefExpr
   exprs
 
 # Add parameter and return types to the typed scope.
@@ -533,10 +539,44 @@ structLiteral = (v, ty, o) ->
   obj = new Value new Obj propList
   new Value new Parens new Block [new Assign(new Value(ptr), v), obj]
 
+# Pull out the last non-comment, non-declaration, and non-type assign node of
+# a node list.
+lastNonCommentOrDeclaration = (list) ->
+  i = list.length
+  return i while i-- when list[i] not instanceof Comment and
+                          list[i] not instanceof DeclareType and
+                          list[i] not instanceof TypeAssign
+
 # Transform a function to have the right stack pointer computations upon entry
-# and exit. If the function may throw, it needs to be explicitly marked as
-# such so the correct code gets generated.
+# and exit. The safe way is to wrap the entire body of the function in a
+# try..finally block to account for possible throws. If the user indicated
+# gotta-go-fast, we'll only emit stack pointer computations for explicit
+# returns.
+stackFence = (o, exprs, frameSize, isRoot) ->
+  exprs.unshift new Assign SP, new Value(new Literal frameSize), '-='
+  restoreStack = new Assign SP, new Value(new Literal frameSize), '+='
+  if opts.unsafe
+    exprs.push restoreStack if isRoot
+  else
+    exprs[0] = new Try new Block(exprs.slice()), null, null, new Block [restoreStack]
+    exprs.length = 1
+  return
+
+# Add SP computations if needed.
 Code::transform = (o) ->
+  return unless frameSize = @frameSize
+  stackFence o, @body.expressions, frameSize
+  return
+
+Return::transform = (o) ->
+  return unless (frameSize = o.frameSize) and opts.unsafe
+  restoreStack = new Assign SP, new Value(new Literal frameSize), '+='
+  if expr = @expression
+    tmp = new Value new Literal o.scope.freeVariable 't'
+    body = [new Assign(tmp, expr), restoreStack, tmp]
+  else
+    body = [restoreStack, undefExpr]
+  @expression = new Value new Parens new Block body
   return
 
 # Transform this Value into a new Value that does offset index lookups on
@@ -551,7 +591,7 @@ Value::transform = (o) ->
     spOffsets = o.spOffsets
     if (name = inner.value) of spOffsets
       stackDeref = stackOffsetExpr SP, spOffsets[name]
-      if props.length then base = stackDeref else return stackDeref
+      if props.length then (base = stackDeref) else return stackDeref
   # Non-access values get transformed at the inner level.
   return unless props.length
   # If we're explicitly dereferencing the struct base, treat it like we
@@ -583,7 +623,7 @@ Assign::transform = (o) ->
     rty = @value.unwrapAll().computedType
     if lty instanceof PointerType and rty in primTys
       @value = multExpr @value, lty.base.size
-      return this
+      return
     else if lty instanceof PointerType and rty instanceof PointerType
       return offsetExpr this, 0, lty.base.size
   else if ty instanceof StructType
@@ -655,7 +695,10 @@ exports.analyzeTypes = (root, o) ->
       usesTypes = yes
       return no
   return unless usesTypes
-  opts.warn = o.warn
+
+  # Global options.
+  opts.warn   = o.warn
+  opts.unsafe = o.unsafe
 
   initialTypes = any: null, byte: byteTy, short: shortTy, int: intTy, uint: uintTy
   types = root.foldChildren initialTypes, 'collectType', null, immediate: true
@@ -665,6 +708,7 @@ exports.analyzeTypes = (root, o) ->
   options = types: types, scope: scope, crossScope: true
   root.foldChildren null, 'primeComputeType', 'computeType', options
   root.spOffsets = spOffsetMap scope
-  root.frameSize = scope.frameSize
+  if root.frameSize = scope.frameSize
+    root.transformRoot = (o) -> stackFence o, @expressions, scope.frameSize, yes
 
   types

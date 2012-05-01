@@ -47,6 +47,7 @@ SWITCHES = [
   ['-v', '--version',         'display the version number']
   ['-w', '--watch',           'watch scripts for changes and rerun commands']
   ['-W', '--warn',            'print warnings when compiling typed code']
+  ['-U', '--gotta-go-fast',   'generate fast and loose code (might be unsafe)']
 ]
 
 # Top-level objects shared by all the functions.
@@ -316,7 +317,7 @@ parseOptions = ->
 
 # The compile-time options to pass to the CoffeeScript compiler.
 compileOptions = (filename) ->
-  {filename, bare: opts.bare, header: opts.compile, warn: opts.warn}
+  {filename, bare: opts.bare, header: opts.compile, warn: opts.warn, unsafe: opts['gotta-go-fast']}
 
 # Start up a new Node.js instance with the arguments in `--nodejs` passed to
 # the `node` binary, preserving the other options.

@@ -37,10 +37,10 @@ exports.Base = class Base
   # already been asked to return the result (because statements know how to
   # return results).
   compile: (o, lvl) ->
+    return trans.compile o, lvl if trans = @transform?(o)
     o        = extend {}, o
     o.level  = lvl if lvl
-    node0    = @transform?(o) or this
-    node     = node0.unfoldSoak(o) or node0
+    node     = @unfoldSoak(o) or this
     node.tab = o.indent
     if o.level is LEVEL_TOP or not node.isStatement(o)
       node.compileNode o
@@ -254,6 +254,7 @@ exports.Block = class Block extends Base
     o.level     = LEVEL_TOP
     @spaced     = yes
     prelude     = ""
+    @transformRoot?(o)
     unless o.bare
       preludeExps = for exp, i in @expressions
         break unless exp.unwrap() instanceof Comment
@@ -416,12 +417,13 @@ exports.DeclareType = class DeclareType extends Base
     # typechecking, but the logic for destructuring is too complicated to
     # warrant duplicating in the typechecking phase.
     scope = o.scope
-    for v in @variables
+    names = for v in @variables
       name = v.unwrapAll().value
       if scope.parent?.check name
         throw TypeError "type for `#{name}' not declared in the same scope"
       scope.find name
-      "#{o.indent}// #{v.compile o, LEVEL_LIST} :: #{@type}"
+      v.compile o, LEVEL_LIST
+    "#{o.indent}// #{names.join(', ')} :: #{@type}"
 
   toString: (idt = '') ->
     '\n' + idt + @constructor.name + @variables + '\n' + idt + TAB + @type
