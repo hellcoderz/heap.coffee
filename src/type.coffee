@@ -24,8 +24,8 @@ I16H   = new Literal 'I16H'
 U16H   = new Literal 'U16H'
 I32H   = new Literal 'I32H'
 U32H   = new Literal 'U32H'
-# The frame pointer.
-FP     = new Literal 'FP'
+# The stack pointer.
+SP     = new Value new Literal 'SP'
 MALLOC = new Value new Literal 'malloc'
 FREE   = new Value new Literal 'free'
 MEMCPY = new Value new Literal 'memcpy'
@@ -45,14 +45,21 @@ offsetExpr = (base, offset, size) ->
   else
     op
 
+# Calls offsetExpr with a size of 1, so that shiftBy is 0 and we don't shift.
+stackOffsetExpr = (base, offset) ->
+  offsetExpr base, offset, 1
+
 multExpr = (base, size) ->
   new Parens new Op '<<', base, new Literal (Math.log(size) / Math.log(2))
 
+class Binding
+  constructor: (@type) ->
+
 # This is like @type, but it also looks up the scope chain.
-Scope::typeOf = (name, immediate) ->
-  found = @type(name)
+Scope::binding = (name, immediate) ->
+  found = @type name
   return found if found or immediate
-  @parent?.typeOf name
+  @parent?.binding name
 
 # Many of the algorithms we do here are more naturally expressed as folds.
 # Also, instead of passing in a function, pass in a prop to be called on each
@@ -230,7 +237,7 @@ Literal::computeType = (r, o) ->
   @computedType = if @value is 'null'
     anyPtrTy
   else if @isAssignable()
-    o.scope.typeOf @value
+    o.scope.binding(@value)?.type
   else if @isSimpleNumber()
     intTy
 
@@ -277,6 +284,9 @@ Value::computeType = (r, o) ->
 Code::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
+  # Cache the stack-allocated variables and their offsets.
+  @spOffsets = spOffsetMap o.scope
+  @frameSize = o.scope.frameSize
   # Arriving in this function means that all the parameters typechecked, since
   # this is called after the body has been processed. So we just need to
   # collect the return expressions and compatible their types.
@@ -324,20 +334,23 @@ Op::computeType = (r, o) ->
       new PointerType ty1
     else if op is 'delete' and (ty1 = first.computedType)
       throw TypeError 'cannot free non-pointer type' unless ty1 instanceof PointerType
-      throw TypeError 'cannot free on-stack variables' if ty1.onStack
       unitTy
     else if op is 'sizeof'
       ty1 = @first = @first.lint o.types
       throw TypeError "cannot determine size of type `#{ty1}'" unless ty1.size
-      # Replace the operand with the type itself.
       intTy
     else if op is '&' and (ty1 = first.computedType)
       throw TypeError "taking reference of an untyped expression:\n#{@first}" unless ty1
-      throw TypeError "taking reference of a function type" if ty1 instanceof ArrowType1
+      throw TypeError "taking reference of a function type" if ty1 instanceof ArrowType
+      throw TypeError "taking reference of non-assignable" unless first.isAssignable()
+      # Can't take references of upvars.
+      if first instanceof Literalo
+        throw TypeError "taking reference of upvar" unless o.scope.check name, true
+        putOnStack o.scope, first.value
       new PointerType ty1
     else if op is '*' and (ty1 = first.computedType)
       throw TypeError "dereferencing an untyped expression:\n#{@first}" unless ty1
-      throw TypeError "dereferencing a non-pointer type" unless ty1 instanceof PointerType and not ty1.onStack
+      throw TypeError "dereferencing a non-pointer type" unless ty1 instanceof PointerType
       ty1.base
     else if (op is '++' or op is '--') and ty1 = first.computedType
       ty1 if ty1 instanceof PointerType or ty1 in primTys
@@ -383,6 +396,7 @@ Return::returnExpression = (exprs, o) ->
 newTypedScope = (p, e, m) ->
   scope = new Scope p, e, m
   scope.variables.length = 0
+  scope.frameSize = 0
   scope
 
 # Find function bindings to match up arrow types.
@@ -403,7 +417,7 @@ newTypedScope = (p, e, m) ->
 Assign::primeComputeType = (r, o) ->
   if (fn = @value.unwrapAll()) instanceof Code and
      (name = @variable.unwrapAll()) instanceof Literal and name.isAssignable() and
-     (ty = o.scope.typeOf name.value) instanceof ArrowType
+     (ty = o.scope.binding(name.value)?.type) instanceof ArrowType
     # Remember the parameter and return types on the right-hand side. The
     # return type is only used to propagate the types further, if it is
     # another arrow type.
@@ -440,15 +454,27 @@ Code::primeComputeType = (r, o) ->
 
 # Declaring a type adds the type to the scope.
 DeclareType::primeComputeType = (r, o) ->
-  type = @type.lint o.types
-  # Stack-allocated pointers to structs
-  if type instanceof StructType
-    type = new PointerType type, yes
+  bind = new Binding @type.lint o.types
   name = @variable.unwrapAll().value
   scope = o.scope
   throw TypeError "cannot redeclare typed variable `#{name}'" if scope.check name
-  scope.add @variable.unwrapAll().value, type
+  scope.add name, bind
+  putOnStack scope, name if bind.type instanceof StructType
   return
+
+# Put a variable on the stack and increment the frame size.
+putOnStack = (scope, name) ->
+  bind = scope.binding name, true
+  bind.onStack = true
+  bind.spOffset = scope.frameSize
+  scope.frameSize += bind.type.size
+
+# Condense a typed scope to a map of variable names to sp offsets.
+spOffsetMap = (scope) ->
+  map = {}
+  for { name, type: bind } in scope.variables when bind.onStack
+    map[name] = bind.spOffset
+  map
 
 # Dereference something in a heap view.
 makeDeref = (base, offset, ty) ->
@@ -511,13 +537,22 @@ structLiteral = (v, ty, o) ->
 # Transform this Value into a new Value that does offset index lookups on
 # HEAP.
 Value::transform = (o) ->
+  return unless @computedType
+  inner = @base.unwrapAll()
   props = @properties
-  return unless @computedType and props.length
+  # Transform stack allocated variables to sp + offset.
+  if inner instanceof Literal and o.frameSize
+    spOffsets = o.spOffsets
+    if (name = inner.value) of spOffsets
+      stackDeref = stackOffsetExpr SP, spOffsets[name]
+      if props.length then @base = stackDeref else return stackDeref
+  # Non-access values get transformed at the inner level.
+  return unless props.length
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
-  v = if (inner = @base.unwrapAll()).isDeref?() then inner.first else @base
+  v = if inner.isDeref?() then inner.first else @base
   cumulativeOffset = 0;
-  for prop in props
+  for prop in @properties
     field = prop.computedField
     if (ty = field.type) instanceof StructType
       cumulativeOffset += field.offset
@@ -534,19 +569,25 @@ Value::transform = (o) ->
 # Do struct copy semantics here since it requires a non-local transformation,
 # i.e. it can't be compiled by transforming the lval and rval individually.
 Assign::transform = (o) ->
-  lval = @variable
-  ty = @computedType
+  return unless ty = @computedType
+  lval = @variable.unwrapAll()
   context = @context
   if (context is '+=' or context is '-=')
-    lty = @variable.unwrapAll().computedType
+    lty = lval.computedType
     rty = @value.unwrapAll().computedType
     if lty instanceof PointerType and rty in primTys
       @value = multExpr @value, lty.base.size
       return this
     else if lty instanceof PointerType and rty instanceof PointerType
       return offsetExpr this, 0, lty.base.size
-  else if lval.isDeref?() and ty instanceof StructType
-    inlineMemcpy lval.first, @value, ty, o
+  else if ty instanceof StructType
+    if lval.isDeref?()
+      inlineMemcpy lval.first, @value, ty, o
+    else
+      # If lval isn't a deref then we know it's an stack-allocated struct. Be
+      # sure to not transform the on-stack lval again.
+      lval.transform = null
+      inlineMemcpy lval, @value, ty, o
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
@@ -555,14 +596,12 @@ Op::transform = (o) ->
   op = @operator
   if @isUnary()
     if op is 'new' and ty1 = @computedType
-      # TODO when ty.onStack
       new Call MALLOC, [new Value new Literal ty.base.size]
     else if op is 'delete'
       new Call FREE, [@first]
     else if op is 'sizeof'
       new Literal @first.size
     else if op is '&'
-      # TODO
       @first
     else if op is '*'
       # This is only called when this deref is _not_ the base of a struct
@@ -616,7 +655,10 @@ exports.analyzeTypes = (root, o) ->
   types = root.foldChildren initialTypes, 'collectType', null, immediate: true
   types[name] = ty.lint types for name, ty of types when ty
 
-  options = types: types, scope: newTypedScope(null, root, null), crossScope: true
+  scope = newTypedScope null, root, null
+  options = types: types, scope: scope, crossScope: true
   root.foldChildren null, 'primeComputeType', 'computeType', options
+  root.spOffsets = spOffsetMap scope
+  root.frameSize = scope.frameSize
 
   types

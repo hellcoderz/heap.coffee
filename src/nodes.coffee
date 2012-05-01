@@ -247,11 +247,13 @@ exports.Block = class Block extends Base
   # It would be better not to generate them in the first place, but for now,
   # clean up obvious double-parentheses.
   compileRoot: (o) ->
-    o.indent  = if o.bare then '' else TAB
-    o.scope   = new Scope null, this, null
-    o.level   = LEVEL_TOP
-    @spaced   = yes
-    prelude   = ""
+    o.spOffsets = @spOffsets
+    o.frameSize = @frameSize
+    o.indent    = if o.bare then '' else TAB
+    o.scope     = new Scope null, this, null
+    o.level     = LEVEL_TOP
+    @spaced     = yes
+    prelude     = ""
     unless o.bare
       preludeExps = for exp, i in @expressions
         break unless exp.unwrap() instanceof Comment
@@ -350,13 +352,13 @@ exports.TypeName = class TypeName extends Base
   toString: -> @name
 
 exports.PointerType = class PointerType extends Base
-  constructor: (@base, @onStack = no) ->
+  constructor: (@base) ->
 
   toString: (lvl = 0) ->
     if lvl > 0 and @debugName
       @debugName
     else
-      if @onStack then '' else '*' + tystr(@base, lvl + 1)
+      '*' + tystr(@base, lvl + 1)
 
 exports.ArrowType = class ArrowType extends Base
   constructor: (@params, @ret) ->
@@ -1262,6 +1264,8 @@ exports.Code = class Code extends Base
   # arrow, generates a wrapper that saves the current value of `this` through
   # a closure.
   compileNode: (o) ->
+    o.spOffsets     = @spOffsets
+    o.frameSize     = @frameSize
     o.scope         = new Scope o.scope, @body, this
     o.scope.shared  = del(o, 'sharedScope')
     o.indent        += TAB
