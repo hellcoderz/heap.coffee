@@ -339,6 +339,8 @@ Op::computeType = (r, o) ->
       throw TypeError "dereferencing an untyped expression:\n#{@first}" unless ty1
       throw TypeError "dereferencing a non-pointer type" unless ty1 instanceof PointerType and not ty1.onStack
       ty1.base
+    else if (op is '++' or op is '--') and ty1 = first.computedType
+      ty1 if ty1 instanceof PointerType or ty1 in primTys
 
   ty1 = @first.unwrapAll().computedType
   ty2 = @second.unwrapAll().computedType
@@ -552,7 +554,7 @@ Op::transform = (o) ->
   return unless @computedType
   op = @operator
   if @isUnary()
-    if op is 'new' and ty = @computedType
+    if op is 'new' and ty1 = @computedType
       # TODO when ty.onStack
       new Call MALLOC, [new Value new Literal ty.base.size]
     else if op is 'delete'
@@ -567,6 +569,10 @@ Op::transform = (o) ->
       # access, as in struct accesses, dereferencing is the same as not
       # dereferencing, since . is extended to work like -> in C.
       makeDeref @first, 0, @first.computedType
+    else if (op is '++' or op is '--') and (ty1 = @computedType) instanceof PointerType
+      # If p :: *T, p++ desugars to (p += sizeof T, p - sizeof T).
+      size = new Value new Literal ty1.base.size
+      new Value new Parens new Block [new Assign(@first, size, '+='), new Op('-', @first, size)]
   else
     ty1 = @first.computedType
     ty2 = @second.computedType
