@@ -449,17 +449,18 @@ Code::primeComputeType = (r, o) ->
       # Lint just in case the user manually declared the parameter types and
       # thus the types were not linted before this point.
       ptys[i] = ptys[i].lint types
-      (new DeclareType new Value(name), ptys[i]).primeComputeType r, o
+      (new DeclareType [new Value(name)], ptys[i]).primeComputeType r, o
   return
 
 # Declaring a type adds the type to the scope.
 DeclareType::primeComputeType = (r, o) ->
   bind = new Binding @type.lint o.types
-  name = @variable.unwrapAll().value
   scope = o.scope
-  throw TypeError "cannot redeclare typed variable `#{name}'" if scope.check name
-  scope.add name, bind
-  putOnStack scope, name if bind.type instanceof StructType
+  for v in @variables
+    name = v.unwrapAll().value
+    throw TypeError "cannot redeclare typed variable `#{name}'" if scope.check name
+    scope.add name, bind
+    putOnStack scope, name if bind.type instanceof StructType
   return
 
 # Put a variable on the stack and increment the frame size.
@@ -532,25 +533,30 @@ structLiteral = (v, ty, o) ->
   obj = new Value new Obj propList
   new Value new Parens new Block [new Assign(new Value(ptr), v), obj]
 
-# A typed value with properties can only a struct access.
-#
+# Transform a function to have the right stack pointer computations upon entry
+# and exit. If the function may throw, it needs to be explicitly marked as
+# such so the correct code gets generated.
+Code::transform = (o) ->
+  return
+
 # Transform this Value into a new Value that does offset index lookups on
-# HEAP.
+# the heap.
 Value::transform = (o) ->
   return unless @computedType
-  inner = @base.unwrapAll()
+  base  = @base
+  inner = base.unwrapAll()
   props = @properties
   # Transform stack allocated variables to sp + offset.
   if inner instanceof Literal and o.frameSize
     spOffsets = o.spOffsets
     if (name = inner.value) of spOffsets
       stackDeref = stackOffsetExpr SP, spOffsets[name]
-      if props.length then @base = stackDeref else return stackDeref
+      if props.length then base = stackDeref else return stackDeref
   # Non-access values get transformed at the inner level.
   return unless props.length
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
-  v = if inner.isDeref?() then inner.first else @base
+  v = if inner.isDeref?() then inner.first else base
   cumulativeOffset = 0;
   for prop in @properties
     field = prop.computedField

@@ -186,16 +186,25 @@ grammar =
   # Pointer types have to be on named types. This is to make it clearer that
   # comparison is nominal, not structural.
   Type: [
-    o 'IDENTIFIER',                                            -> new TypeName $1
-    o '* IDENTIFIER',                                          -> new PointerType new TypeName $2
-    o 'PARAM_START TypeList PARAM_END -> INDENT Type OUTDENT', -> new ArrowType $2, $6
-    o 'STRUCT { StructFieldList OptComma }',                   -> new StructType $3
-    o 'STRUCT INDENT StructFieldList OptComma OUTDENT',        -> new StructType $3
+    o 'IDENTIFIER',                                     -> new TypeName $1
+    o '* IDENTIFIER',                                   -> new PointerType new TypeName $2
+    o 'PARAM_START TypeList PARAM_END ->
+       INDENT Type OUTDENT',                            -> new ArrowType $2, $6
+    o 'STRUCT { StructFieldList OptComma }',            -> new StructType $3
+    o 'STRUCT INDENT StructFieldList OptComma OUTDENT', -> new StructType $3
+  ]
+
+  IdentifierList: [
+    o 'Identifier',                             -> [$1]
+    o 'IdentifierList , Identifier',            -> $1.concat $3
   ]
 
   DeclareType: [
-    o 'Identifier IS_TYPE Type',                -> new DeclareType $1, $3
-    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new DeclareType $1, $3
+    o 'Identifier IS_TYPE Type',                -> new DeclareType [$1], $3
+    o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new DeclareType [$1], $4
+    o 'DECL_START IdentifierList IS_TYPE Type', -> new DeclareType $2, $4
+    o 'DECL_START IdentifierList
+       IS_TYPE INDENT Type OUTDENT',            -> new DeclareType $2, $5
   ]
 
   TypeAssign: [

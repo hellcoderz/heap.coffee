@@ -405,9 +405,9 @@ exports.TypeAssign = class TypeAssign extends Base
     '\n' + idt + @constructor.name + ' ' + @name + '\n' + idt + TAB + @type
 
 exports.DeclareType = class DeclareType extends Base
-  constructor: (@variable, @type) ->
+  constructor: (@variables, @type) ->
 
-  children: ['variable']
+  children: ['variables']
   isStatement: YES
 
   compile: (o, level) ->
@@ -416,14 +416,15 @@ exports.DeclareType = class DeclareType extends Base
     # typechecking, but the logic for destructuring is too complicated to
     # warrant duplicating in the typechecking phase.
     scope = o.scope
-    name = @variable.unwrapAll().value
-    if scope.parent?.check name
-      throw TypeError "type for `#{name}' not declared in the same scope"
-    o.scope.find name
-    "#{o.indent}// #{@variable.compile o, LEVEL_LIST} :: #{@type}"
+    for v in @variables
+      name = v.unwrapAll().value
+      if scope.parent?.check name
+        throw TypeError "type for `#{name}' not declared in the same scope"
+      scope.find name
+      "#{o.indent}// #{v.compile o, LEVEL_LIST} :: #{@type}"
 
   toString: (idt = '') ->
-    '\n' + idt + @constructor.name + @variable + '\n' + idt + TAB + @type
+    '\n' + idt + @constructor.name + @variables + '\n' + idt + TAB + @type
 
 exports.Cast = class Cast extends Base
   constructor: (@expr, @type) ->
