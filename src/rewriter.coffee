@@ -105,7 +105,7 @@ class exports.Rewriter
         token[0] = ':='
         token[1] = '='
         tokens.splice i+1, 1
-      if token[0] is '::' and (token.spaced or token.newLine) and tokens[i-1]?.spaced
+      else if token[0] is '::' and (token.spaced or token.newLine) and tokens[i-1]?.spaced
         token[0] = 'IS_TYPE'
         # This code is an abomination but it's to get around ambiguity in the
         # grammar.
@@ -114,15 +114,16 @@ class exports.Rewriter
         while (tok = tokens[--i]?[0]) and
               (tok isnt 'TERMINATOR' and tok isnt 'INDENT')
           if tok isnt 'IDENTIFIER' and tok isnt ','
-            return
+            return 1
           hasComma ||= tok is ','
         if hasComma
           # Used to disambiguate , expressions and identifier lists in type
           # declarations.
           tokens.splice i + 1, 0, @generate 'DECL_START', '', token[2]
-      token[0] = 'TYPE' if token[0] is 'IDENTIFIER' and token[1] is 'type' and
-                           tokens[i+1]?[0] is 'IDENTIFIER' and tokens[i+2]?[0] is '='
-      if token[0] is 'PARAM_START' and
+      else if token[0] is 'IDENTIFIER' and token[1] is 'type' and
+         tokens[i+1]?[0] is 'IDENTIFIER' and tokens[i+2]?[0] is '='
+        token[0] = 'TYPE'
+      else if token[0] is 'PARAM_START' and
          tokens[--i][0] is 'IS_TYPE' and tokens[--i][0] is ')'
         # Logic copied from Lexer::tagParameters.
         tokens[i][0] = 'PARAM_END'
