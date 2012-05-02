@@ -72,6 +72,12 @@ task 'build', 'build the CoffeeScript language from source', build = (cb) ->
   run ['-c', '-o', 'lib/coffee-script'].concat(files), cb
 
 
+task 'build:heap', 'build the heap runtime', build = (cb) ->
+  files = fs.readdirSync 'src/heap'
+  files = ('src/heap/' + file for file in files when file.match(/\.coffee$/))
+  run ['-c', '-o', 'lib/heap'].concat(files), cb
+
+
 task 'build:full', 'rebuild the source twice, and run the tests', ->
   build ->
     build ->
@@ -113,8 +119,8 @@ task 'build:browser', 'rebuild the merged script for inclusion in the browser', 
 
       if (typeof define === 'function' && define.amd) {
         define(function() { return CoffeeScript; });
-      } else { 
-        root.CoffeeScript = CoffeeScript; 
+      } else {
+        root.CoffeeScript = CoffeeScript;
       }
     }(this));
   """

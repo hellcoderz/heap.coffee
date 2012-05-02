@@ -1,5 +1,4 @@
-#
-# `type.coffee' contains all the code having to do with analyzing types for
+# `type.coffee` contains all the code having to do with analyzing types for
 # generating code with a manual heap.
 #
 # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -8,7 +7,6 @@
 #
 # Only local variables may be typed and types are file-local. To import
 # external typed stuff unsafe casts are required.
-#
 
 {Scope} = require './scope'
 {Base, Parens, Block, Value, Literal, Op, Assign, Try,
@@ -18,18 +16,21 @@
 {flatten, extend, tystr} = require './helpers'
 
 # HEAP is the byte-sized view.
-HEAP   = new Literal '_I8'
+HEAP    = new Literal '_I8'
 # Views of other sizes.
-U8H    = new Literal '_U8'
-I16H   = new Literal '_I16'
-U16H   = new Literal '_U16'
-I32H   = new Literal '_I32'
-U32H   = new Literal '_U32'
-# The stack pointer.
-SP     = new Value new Literal '_SP'
-MALLOC = new Value new Literal 'malloc'
-FREE   = new Value new Literal 'free'
-MEMCPY = new Value new Literal 'memcpy'
+U8      = new Literal '_U8'
+I16     = new Literal '_I16'
+U16     = new Literal '_U16'
+I32     = new Literal '_I32'
+U32     = new Literal '_U32'
+# The local stack pointer.
+SP      = new Value new Literal '_SP'
+# Dereferencing the stack pointer.
+SPDEREF = new Value U32, [new Index new Value new Literal 1]
+# Memory operations.
+MALLOC  = new Value new Literal 'malloc'
+FREE    = new Value new Literal 'free'
+MEMCPY  = new Value new Literal 'memcpy'
 
 # Global option for if we should print warnings.
 opts = { warn: false, unsafe: false }
@@ -47,8 +48,8 @@ offsetExpr = (base, offset, size) ->
     op
 
 # Calls offsetExpr with a size of 1, so that shiftBy is 0 and we don't shift.
-stackOffsetExpr = (base, offset) ->
-  offsetExpr base, offset, 1
+stackOffsetExpr = (offset) ->
+  offsetExpr SP, offset, 1
 
 # Multiply by a size. If the size is a power of 2, use left shift.
 multExpr = (base, size) ->
@@ -266,6 +267,8 @@ Assign::computeType = (r, o) ->
   else if context is '-=' and lty instanceof PointerType and rty instanceof PointerType
     return @computedType = intTy if unify o.types, lty.base, rty.base
   unless @computedType = unify o.types, lty, rty, true
+    console.log @variable
+    console.log @value
     throw TypeError "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
 
 # Accesses on struct types may be typed. If we arrived at this case it's
@@ -351,10 +354,11 @@ Op::computeType = (r, o) ->
       throw TypeError "taking reference of non-assignable" unless first.isAssignable()
       # Can't take references of upvars.
       if first instanceof Literal
-        name = first.value
-        unless o.scope.check name, true
+        name  = first.value
+        scope = o.scope
+        unless scope.check name, true
           throw TypeError "taking reference of non-local or undefined variable `#{name}'"
-        putOnStack o.scope, name
+        putOnStack scope, name
       new PointerType ty1
     else if op is '*' and (ty1 = first.computedType)
       throw TypeError "dereferencing an untyped expression:\n#{@first}" unless ty1
@@ -382,7 +386,7 @@ Op::computeType = (r, o) ->
   else if op is '%'
     intTy
   else if op in BITWISE_OPS
-    ty1
+    intTy
   else if op in ARITH_OPS and ty1 in primTys and ty2 in primTys
     unify o.types, ty1, ty2
 
@@ -455,18 +459,21 @@ Code::primeComputeType = (r, o) ->
       # Lint just in case the user manually declared the parameter types and
       # thus the types were not linted before this point.
       ptys[i] = ptys[i].lint types
-      (new DeclareType [new Value(name)], ptys[i]).primeComputeType r, o
+      (new DeclareType [new Value(name)], ptys[i]).declareType r, o
+  # Hoist all the DeclareTypes to the top and process them. We shouldn't cross
+  # scope here.
+  @body.foldChildren null, 'declareType', null, types: o.types, scope: o.scope
   return
 
 # Declaring a type adds the type to the scope.
-DeclareType::primeComputeType = (r, o) ->
-  bind = new Binding @type.lint o.types
+DeclareType::declareType = (r, o) ->
+  type  = @type.lint o.types
   scope = o.scope
   for v in @variables
     name = v.unwrapAll().value
     throw TypeError "cannot redeclare typed variable `#{name}'" if scope.check name
-    scope.add name, bind
-    putOnStack scope, name if bind.type instanceof StructType
+    scope.add name, new Binding type
+    putOnStack scope, name if type instanceof StructType
   return
 
 # Put a variable on the stack and increment the frame size.
@@ -553,8 +560,9 @@ lastNonCommentOrDeclaration = (list) ->
 # gotta-go-fast, we'll only emit stack pointer computations for explicit
 # returns.
 stackFence = (o, exprs, frameSize, isRoot) ->
-  exprs.unshift new Assign SP, new Value(new Literal frameSize), '-='
-  restoreStack = new Assign SP, new Value(new Literal frameSize), '+='
+  exprs.unshift new Assign SP, SPDEREF
+  exprs.unshift new Assign SPDEREF, new Value(new Literal frameSize), '-='
+  restoreStack = new Assign SPDEREF, new Value(new Literal frameSize), '+='
   if opts.unsafe
     exprs.push restoreStack if isRoot
   else
@@ -570,7 +578,7 @@ Code::transform = (o) ->
 
 Return::transform = (o) ->
   return unless (frameSize = o.frameSize) and opts.unsafe
-  restoreStack = new Assign SP, new Value(new Literal frameSize), '+='
+  restoreStack = new Assign SPDEREF, new Value(new Literal frameSize), '+='
   if expr = @expression
     tmp = new Value new Literal o.scope.freeVariable 't'
     body = [new Assign(tmp, expr), restoreStack, tmp]
@@ -590,7 +598,7 @@ Value::transform = (o) ->
   if inner instanceof Literal and o.frameSize
     spOffsets = o.spOffsets
     if (name = inner.value) of spOffsets
-      stackDeref = stackOffsetExpr SP, spOffsets[name]
+      stackDeref = stackOffsetExpr spOffsets[name]
       if props.length then (base = stackDeref) else return stackDeref
   # Non-access values get transformed at the inner level.
   return unless props.length
@@ -627,13 +635,7 @@ Assign::transform = (o) ->
     else if lty instanceof PointerType and rty instanceof PointerType
       return offsetExpr this, 0, lty.base.size
   else if ty instanceof StructType
-    if lval.isDeref?()
-      inlineMemcpy lval.first, @value, ty, o
-    else
-      # If lval isn't a deref then we know it's an stack-allocated struct. Be
-      # sure to not transform the on-stack lval again.
-      lval.transform = null
-      inlineMemcpy lval, @value, ty, o
+    inlineMemcpy (if lval.isDeref?() then lval.first else @variable), @value, ty, o
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
@@ -642,8 +644,10 @@ Op::transform = (o) ->
   op = @operator
   if @isUnary()
     if op is 'new' and ty1 = @computedType
+      o.scope.root.needsMalloc = yes
       new Call MALLOC, [new Value new Literal ty.base.size]
     else if op is 'delete'
+      o.scope.root.needsMalloc = yes
       new Call FREE, [@first]
     else if op is 'sizeof'
       new Literal @first.size
@@ -671,7 +675,7 @@ Op::transform = (o) ->
       offsetExpr this, 0, ty1.base.size
 
 # Pointers are 4-byte aligned for now.
-PointerType::view = U32H
+PointerType::view = U32
 
 # Primitive types as found in C.
 class PrimitiveType
@@ -682,11 +686,14 @@ class PrimitiveType
 # Cache this for typing null values.
 anyPtrTy = new PointerType null
 byteTy   = new PrimitiveType 1, 'byte',  HEAP, yes
-shortTy  = new PrimitiveType 2, 'short', I16H, yes
-intTy    = new PrimitiveType 4, 'int',   I32H, yes
-uintTy   = new PrimitiveType 4, 'uint',  U32H, no
+shortTy  = new PrimitiveType 2, 'short', I16, yes
+intTy    = new PrimitiveType 4, 'int',   I32, yes
+uintTy   = new PrimitiveType 4, 'uint',  U32, no
 # Sized primitive types.
 primTys  = [ byteTy, shortTy, intTy, uintTy ]
+
+requireExpr = (name) ->
+  new Call new Value(new Literal 'require'), [new Value new Literal "'#{name}'"]
 
 exports.analyzeTypes = (root, o) ->
   usesTypes = no
@@ -705,10 +712,24 @@ exports.analyzeTypes = (root, o) ->
   types[name] = ty.lint types for name, ty of types when ty
 
   scope = newTypedScope null, root, null
-  options = types: types, scope: scope, crossScope: true
+  options = types: types, scope: scope
+  root.foldChildren null, 'declareType', null, options
+  options.crossScope = true
   root.foldChildren null, 'primeComputeType', 'computeType', options
   root.spOffsets = spOffsetMap scope
-  if root.frameSize = scope.frameSize
-    root.transformRoot = (o) -> stackFence o, @expressions, scope.frameSize, yes
+  root.frameSize = scope.frameSize
+  root.transformRoot = (o) ->
+    exprs = @expressions
+    # Do the stack fence for the module.
+    stackFence o, @expressions, frameSize, yes if frameSize = scope.frameSize
+    # Bring in malloc if this module needs it.
+    if scope.needsMalloc
+      obj = new Value new Obj [MALLOC, FREE]
+      exprs.unshift new Assign obj, requireExpr 'heap/malloc'
+    # Bring in the heap views.
+    props = []
+    props.push new Value view for view in [HEAP, U8, I16, U16, I32, U32]
+    obj = new Value new Obj props
+    exprs.unshift new Assign obj, requireExpr 'heap/heap'
 
   types
