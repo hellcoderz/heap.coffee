@@ -15,9 +15,8 @@
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend, tystr} = require './helpers'
 
-# HEAP is the byte-sized view.
-HEAP    = new Literal '_I8'
-# Views of other sizes.
+# Views.
+I8      = new Literal '_I8'
 U8      = new Literal '_U8'
 I16     = new Literal '_I16'
 U16     = new Literal '_U16'
@@ -524,8 +523,8 @@ inlineMemcpy = (dest, src, ty, o) ->
   else
     for i in [0...ty.size]
       offset = new Value new Literal i
-      stmts.push new Assign new Value(HEAP, [new Index new Op '+', new Value(destPtr), offset]),
-                            new Value(HEAP, [new Index new Op '+', new Value(srcPtr), offset])
+      stmts.push new Assign new Value(U8, [new Index new Op '+', new Value(destPtr), offset]),
+                            new Value(U8, [new Index new Op '+', new Value(srcPtr), offset])
   stmts.push new Value destPtr
   new Value new Parens new Block stmts
 
@@ -545,14 +544,6 @@ structLiteral = (v, ty, o) ->
     propList.push new Assign new Value(new Literal fname), propValue.transform(), 'object'
   obj = new Value new Obj propList
   new Value new Parens new Block [new Assign(new Value(ptr), v), obj]
-
-# Pull out the last non-comment, non-declaration, and non-type assign node of
-# a node list.
-lastNonCommentOrDeclaration = (list) ->
-  i = list.length
-  return i while i-- when list[i] not instanceof Comment and
-                          list[i] not instanceof DeclareType and
-                          list[i] not instanceof TypeAssign
 
 # Transform a function to have the right stack pointer computations upon entry
 # and exit. The safe way is to wrap the entire body of the function in a
@@ -685,7 +676,7 @@ class PrimitiveType
 
 # Cache this for typing null values.
 anyPtrTy = new PointerType null
-byteTy   = new PrimitiveType 1, 'byte',  HEAP, yes
+byteTy   = new PrimitiveType 1, 'byte',  U8,  no
 shortTy  = new PrimitiveType 2, 'short', I16, yes
 intTy    = new PrimitiveType 4, 'int',   I32, yes
 uintTy   = new PrimitiveType 4, 'uint',  U32, no
@@ -728,7 +719,7 @@ exports.analyzeTypes = (root, o) ->
       exprs.unshift new Assign obj, requireExpr 'heap/malloc'
     # Bring in the heap views.
     props = []
-    props.push new Value view for view in [HEAP, U8, I16, U16, I32, U32]
+    props.push new Value view for view in [I8, U8, I16, U16, I32, U32]
     obj = new Value new Obj props
     exprs.unshift new Assign obj, requireExpr 'heap/heap'
 
