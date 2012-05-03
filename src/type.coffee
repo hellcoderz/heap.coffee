@@ -687,7 +687,7 @@ Value::transform = (o) ->
   # weren't.
   v = if inner.isDeref?() then inner.first else base
   vty = v.computedType
-  cumulativeOffset = 0;
+  cumulativeOffset = 0
   for prop in @properties
     field = prop.computedField
     if (fty = field.type) instanceof StructType
