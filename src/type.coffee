@@ -670,7 +670,10 @@ Call::transform = (o) ->
 
 # Transform stack allocated variables to dereference sp + offset.
 Literal::transform = (o) ->
-  return unless (ty = @computedType) and o.frameSize
+  return unless (ty = @computedType)
+  # This matters for TI: null will cause the typeset of pointers to be dimorphic.
+  @value = '0' if @value is 'null' and ty instanceof PointerType
+  return unless o.frameSize
   spOffsets = o.spOffsets
   if (name = @value) of spOffsets
     new Value U32, [new Index stackOffsetExpr spOffsets[name], ty]
