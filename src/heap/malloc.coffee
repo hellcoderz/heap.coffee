@@ -18,7 +18,7 @@ malloc = (nbytes) ->
   nunits = ((nbytes + sizeof header - 1) / sizeof header + 1) >> 0
   unless prevp = freep
     # Haven't allocated a free list yet, do it now.
-    prevp = freep = _U32[0] as *header
+    prevp = freep = _U32[0] as *any
     _U32[0] += sizeof header
     freep.ptr  = freep
     freep.size = 0
@@ -49,7 +49,7 @@ morecore = (nu) ->
   bytesNeeded = nu * sizeof header
   return null if _U32[0] + bytesNeeded >= _U8.length
   up :: *header
-  up = _U32[0] as *header
+  up = _U32[0] as *any
   up.size = nu;
   _U32[0] += bytesNeeded
   free up + 1

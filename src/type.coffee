@@ -22,33 +22,55 @@ I16     = new Literal '_I16'
 U16     = new Literal '_U16'
 I32     = new Literal '_I32'
 U32     = new Literal '_U32'
-# The local stack pointer.
+# The cached stack pointer.
 SP      = new Value new Literal '_SP'
-# Dereferencing the stack pointer.
-SPDEREF = new Value U32, [new Index new Value new Literal 1]
+# The actual stack pointer.
+SPREAL  = new Value U32, [new Index new Value new Literal 1]
 # Memory operations.
 MALLOC  = new Value new Literal 'malloc'
 FREE    = new Value new Literal 'free'
 MEMCPY  = new Value new Literal 'memcpy'
 
+# Used to compute shifts.
+I8.BYTES_PER_ELEMENT  = U8.BYTES_PER_ELEMENT  = 1
+I16.BYTES_PER_ELEMENT = U16.BYTES_PER_ELEMENT = 2
+I32.BYTES_PER_ELEMENT = U32.BYTES_PER_ELEMENT = 4
+
 # Global option for if we should print warnings.
 opts = { warn: false, unsafe: false }
 printWarn = (line) -> process.stderr.write 'warning: ' + line + '\n' if opts.warn
 
-offsetExpr = (base, offset, size) ->
-  op = if offset isnt 0
-    new Op '+', base, new Value new Literal offset
+normalizePtr = (ptr, lalign, ralign) ->
+  # We're done if they're the same size or if the ptr is 0 or null.
+  if lalign is ralign or
+     ((inner = ptr.unwrapAll()) instanceof Literal and
+      inner.value is '0' or inner.value is 'null')
+    return ptr
+  # Compute the ratio.
+  if lalign < ralign
+    ratio = ralign / lalign
+    op = '<<'
   else
-    base
-  shiftBy = Math.log(size) / Math.log(2)
-  if shiftBy isnt 0
-    new Op '>>', op, new Literal shiftBy
+    ratio = lalign / ralign
+    op = '>>'
+  # Pretty sure this is true all the time, commenting it out for now.
+  # if ratio and not ((ratio & (ratio - 1)) is 0)
+  #   throw TypeError "ratio between primitive type sizes must be a power of 2"
+  new Parens new Op op, ptr, new Value new Literal (Math.log(ratio) / Math.log(2))
+
+offsetExpr = (base, baseTy, offset, offsetTy) ->
+  balign = baseTy.view.BYTES_PER_ELEMENT
+  oalign = offsetTy.view.BYTES_PER_ELEMENT
+  normalized = normalizePtr base, balign, oalign
+  if offset isnt 0
+    # Offsets are always in bytes, so compute the right offset now.
+    new Op '+', normalized, new Value new Literal offset / oalign
   else
-    op
+    normalized
 
 # Calls offsetExpr with a size of 1, so that shiftBy is 0 and we don't shift.
-stackOffsetExpr = (offset) ->
-  offsetExpr SP, offset, 1
+stackOffsetExpr = (offset, offsetTy) ->
+  offsetExpr SP, SP.computedType, offset, offsetTy
 
 # Multiply by a size. If the size is a power of 2, use left shift.
 multExpr = (base, size) ->
@@ -95,6 +117,14 @@ TypeAssign::collectType = (types) ->
   types[@name] = @type
   types
 
+# Align an offset according to its size.
+alignOffset = (offset, ty) ->
+  size = ty.view.BYTES_PER_ELEMENT
+  (((offset - 1) / size + 1) | 0) * size
+
+# Number of units in alignment size.
+alignmentUnits = (ty) -> ty.size / ty.view.BYTES_PER_ELEMENT
+
 # Sanity check the type and compute the size. Expects synonyms to already have
 # been computed.
 #
@@ -113,6 +143,7 @@ TypeName::lint = (types) ->
   @linted = linted
 
 PointerType::size = 4
+PointerType::view = U32
 PointerType::lint = (types) ->
   return this if @linted
   @linted = true
@@ -120,6 +151,7 @@ PointerType::lint = (types) ->
   if @base instanceof ArrowType
     throw TypeError "cannot take pointers of function types"
   this
+PointerType::baseAlignment = -> @base?.view.BYTES_PER_ELEMENT or 1
 
 StructType::lint = (types) ->
   return this if @linted
@@ -131,44 +163,65 @@ StructType::lint = (types) ->
   # The size of the struct is the its maximum offset + the size of the largest
   # field with that offset.
   size = 0
+  # Start off with the smallest view, U8.
+  maxView = U8
+  # An undefined offset tells the typechecker to fill it in from the
+  # previous field. For example,
+  #
+  #   struct { [4] i :: int, j :: int }
+  #
+  # is the same as
+  #
+  #   struct { [4] i :: int, [8] j :: int }
+  #
+  # The first field's offset is 0 if undefined.
+  #
+  # The special form [-] means to use the same offset as the previous
+  # field. For example,
+  #
+  #   struct { i :: int, [-] j :: int }
+  #
+  # is the same as
+  #
+  #   struct { [0] i :: int, [0] j ::
+  #
+  # Since there is an imaginary first field with an offset of 0, you can use
+  # [-] on the first field too to make everything line up.
+  #
+  # The special form [+] means add the size of the previous field to the
+  # previous field's offset for the current offset. This is the default
+  # behavior when no offset attribute exists.
+  #
+  # Field offsets must be aligned to the type of the field.
   for field in fields
-    # An undefined offset tells the typechecker to fill it in from the
-    # previous field. For example,
-    #
-    #   struct { [4] i :: int, j :: int }
-    #
-    # is the same as
-    #
-    #   struct { [4] i :: int, [8] j :: int }
-    #
-    # The first field's offset is 0 if undefined.
-    #
-    # The special form [-] means to use the same offset as the previous
-    # field. For example,
-    #
-    #   struct { i :: int, [-] j :: int }
-    #
-    # is the same as
-    #
-    #   struct { [0] i :: int, [0] j ::
-    #
-    # Since there is an imaginary first field with an offset of 0, you can use
-    # [-] on the first field too to make everything line up.
-    #
-    # The speical form [+] means add the size of the previous field to the
-    # previous field's offset for the current offset. This is the default
-    # behavior when no offset attribute exists.
+    ty = field.type
+    # Record the max view encountered to set as the view of this struct.
+    maxView = ty.view if ty.view.BYTES_PER_ELEMENT > maxView.BYTES_PER_ELEMENT
     if (offset = field.offset)?
       throw TypeError "struct field offsets cannot be negative" if offset < 0
       if offset < prev.offset
         printWarn "offset of field `#{field.name}' is smaller offset of previous field"
+      if offset isnt alignOffset offset, ty
+        throw TypeError "manual offset [#{offset}] cannot be aligned to `#{ty}'"
     else if field.usePreviousOffset
-      field.offset = prev.offset
+      # If the previous offset isn't aligned to the current field's size, move
+      # both up.
+      if (field.offset = alignOffset prev.offset, ty) isnt prev.offset
+        prev.offset = field.offset
     else
-      field.offset = prev.offset + prev.type.size
-    size = s if (s = field.offset + field.type.size) > size
+      field.offset = alignOffset prev.offset + prev.type.size, ty
+    size = s if (s = field.offset + ty.size) > size
     prev = field
-  @size = size
+  # Pointers of incompatible types cannot be at the same offset due to alignment.
+  for field in fields when (ty = field.type) instanceof PointerType
+    for field2 in fields when field2.offset is field.offset and
+                              (ty2 = field2.type) instanceof PointerType
+      # Print warnings about unioning incompatible pointer types, which is unsafe.
+      unify types, ty, ty2, true and unify types, ty2, ty, true
+  # Pad the size to a multiple of the alignment.
+  align = maxView.BYTES_PER_ELEMENT
+  @size = (((size - 1) / align + 1) | 0) * align
+  @view = maxView
   this
 
 ArrowType::lint = (types) ->
@@ -189,12 +242,17 @@ unify = (types, lty, rty, assign) ->
   return lty if lty is rty
   # If the left side is dynamic, the entire expression is dynamic.
   return unless lty and rty
-  # Two pointer types are compatible iff their bases are compatible.
+  # Two pointer types are compatible iff their bases are size compatible.
   if lty instanceof PointerType and rty instanceof PointerType
-    # If we're assigning, *any can be assigned to any pointer and keep the
-    # type of the original pointer.
-    return lty if assign and not rty.base
-    return new PointerType unify types, lty.base, rty.base, assign
+    if assign
+      # Assigning a narrower pointer to a wider one may mess up due to
+      # alignment, since all views are aligned.
+      if rty.base and rty.baseAlignment() < lty.baseAlignment()
+        printWarn "incompatible pointer conversion from `#{rty}' to `#{lty}' may alter its value"
+      return lty
+    else
+      # If we're not assigning, the base types have to be exactly the same.
+      return lty if lty.base is rty.base
   # Two function types are compatible if their parameters and return types are
   # compatible.
   if lty instanceof ArrowType and rty instanceof ArrowType
@@ -225,7 +283,7 @@ unify = (types, lty, rty, assign) ->
   null
 
 # Is this Op a dereference?
-Op::isDeref = -> not @second and @operator is '*'
+Op::isAssignable = Op::isDeref = -> not @second and @operator is '*'
 
 # By default, computeType returns undefined, which means dynamic.
 Base::computeType = (r, o) ->
@@ -266,8 +324,6 @@ Assign::computeType = (r, o) ->
   else if context is '-=' and lty instanceof PointerType and rty instanceof PointerType
     return @computedType = intTy if unify o.types, lty.base, rty.base
   unless @computedType = unify o.types, lty, rty, true
-    console.log @variable
-    console.log @value
     throw TypeError "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
 
 # Accesses on struct types may be typed. If we arrived at this case it's
@@ -311,8 +367,7 @@ Code::computeType = (r, o) ->
 Call::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  f = @variable.unwrapAll()
-  return unless fty = f.computedType
+  return unless fty = @variable?.unwrapAll().computedType
   throw TypeError "calling a non-function type `#{fty}'" unless fty instanceof ArrowType
   paramTys = fty.params
   args = @args
@@ -328,6 +383,10 @@ Call::computeType = (r, o) ->
 
 # Allocations, pointer arithmetic, and foldably constant arithmetic
 # expressions may be typed.
+ARITH   = [ '+', '-', '*', '/' ]
+BITWISE = [ '<<', '>>', '>>>', '~', '&', '|' ]
+COMPARE = [ '===', '!==', '<', '>', '<=', '>=' ]
+
 Op::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
@@ -375,18 +434,22 @@ Op::computeType = (r, o) ->
     ty1 = ty2
     ty2 = tmp
 
-  ARITH_OPS   = [ '+', '-', '*', '/' ]
-  BITWISE_OPS = [ '<<', '>>', '>>>', '~', '&', '|' ]
-
   @computedType = if (op is '+' or op is '-') and ty1 instanceof PointerType and ty2 in primTys
     ty1
   else if op is '-' and ty1 instanceof PointerType and ty2 instanceof PointerType
-    intTy if unify o.types, ty1.base, ty2.base
+    unless unify o.types, ty1.base, ty2.base
+      printWarn "pointer subtraction on incompatible pointer types `#{ty1}' and `#{ty2}'"
+    intTy
   else if op is '%'
     intTy
-  else if op in BITWISE_OPS
+  else if op in COMPARE
+    if ty1 instanceof PointerType and ty2 instanceof PointerType and
+       not unify o.types, ty1, ty2
+      printWarn "comparison between incompatible pointer types `#{ty1}' and `#{ty2}'"
     intTy
-  else if op in ARITH_OPS and ty1 in primTys and ty2 in primTys
+  else if op in BITWISE
+    intTy
+  else if op in ARITH and ty1 in primTys and ty2 in primTys
     unify o.types, ty1, ty2
 
 # Gather return expressions.
@@ -479,8 +542,8 @@ DeclareType::declareType = (r, o) ->
 putOnStack = (scope, name) ->
   bind = scope.binding name, true
   bind.onStack = true
-  bind.spOffset = scope.frameSize
-  scope.frameSize += bind.type.size
+  bind.spOffset = alignOffset scope.frameSize, bind.type
+  scope.frameSize += bind.spOffset + bind.type.size
 
 # Condense a typed scope to a map of variable names to sp offsets.
 spOffsetMap = (scope) ->
@@ -490,9 +553,8 @@ spOffsetMap = (scope) ->
   map
 
 # Dereference something in a heap view.
-makeDeref = (base, offset, ty) ->
-  throw TypeError "unknown view on type `#{ty}'" unless ty.view
-  new Value ty.view, [new Index offsetExpr base, offset, ty.size]
+makeDeref = (base, baseTy, offset, offsetTy) ->
+  new Value offsetTy.view, [new Index offsetExpr base, baseTy, offset, offsetTy]
 
 # Generate an inline memcpy.
 inlineMemcpy = (dest, src, ty, o) ->
@@ -550,10 +612,10 @@ structLiteral = (v, ty, o) ->
 # try..finally block to account for possible throws. If the user indicated
 # gotta-go-fast, we'll only emit stack pointer computations for explicit
 # returns.
-stackFence = (o, exprs, frameSize, isRoot) ->
-  exprs.unshift new Assign SP, SPDEREF
-  exprs.unshift new Assign SPDEREF, new Value(new Literal frameSize), '-='
-  restoreStack = new Assign SPDEREF, new Value(new Literal frameSize), '+='
+stackFence = (exprs, frameSize, isRoot) ->
+  exprs.unshift new Assign SP, normalizePtr(SPREAL, U32.BYTES_PER_ELEMENT, 1)
+  exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
+  restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
   if opts.unsafe
     exprs.push restoreStack if isRoot
   else
@@ -561,21 +623,49 @@ stackFence = (o, exprs, frameSize, isRoot) ->
     exprs.length = 1
   return
 
+Cast::transform = (r, o) ->
+  lty = @computedType
+  rty = @expr.unwrapAll().computedType
+  return unless lty instanceof PointerType and rty instanceof PointerType
+  normalizePtr @expr, lty.baseAlignment(), rty.baseAlignment()
+
 # Add SP computations if needed.
 Code::transform = (o) ->
+  o.returnType = @computedType?.ret
   return unless frameSize = @frameSize
-  stackFence o, @body.expressions, frameSize
+  o.spOffsets = @spOffsets
+  o.frameSize = frameSize
+  stackFence @body.expressions, frameSize
   return
 
+# Add SP computation and pointer conversions to explicit returns.
 Return::transform = (o) ->
+  # First transform for pointer conversion.
+  if (ty = o.returnType) and ty instanceof PointerType and expr = @expression
+    lalign = ty.baseAlignment();
+    ralign = expr.unwrapAll().computedType.baseAlignment();
+    @expression = normalizePtr @expression, lalign, ralign
+  # Then transform for any stack fencing we need to do.
   return unless (frameSize = o.frameSize) and opts.unsafe
-  restoreStack = new Assign SPDEREF, new Value(new Literal frameSize), '+='
+  restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
   if expr = @expression
     tmp = new Value new Literal o.scope.freeVariable 't'
     body = [new Assign(tmp, expr), restoreStack, tmp]
   else
     body = [restoreStack, undefExpr]
   @expression = new Value new Parens new Block body
+  return
+
+# Need to convert pointers when passing them as arguments.
+Call::transform = (o) ->
+  return unless fty = @variable?.unwrapAll().computedType
+  paramTys = fty.params
+  args = @args
+  for pty, i in fty.params
+    if pty instanceof PointerType
+      lalign = pty.baseAlignment()
+      ralign = args[i].computedType.baseAlignment()
+      args[i] = normalizePtr args[i], lalign, ralign
   return
 
 # Transform this Value into a new Value that does offset index lookups on
@@ -589,22 +679,24 @@ Value::transform = (o) ->
   if inner instanceof Literal and o.frameSize
     spOffsets = o.spOffsets
     if (name = inner.value) of spOffsets
-      stackDeref = stackOffsetExpr spOffsets[name]
+      stackDeref = new Value U32, [new Index stackOffsetExpr spOffsets[name], @computedType]
       if props.length then (base = stackDeref) else return stackDeref
   # Non-access values get transformed at the inner level.
   return unless props.length
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
   v = if inner.isDeref?() then inner.first else base
+  vty = v.computedType
   cumulativeOffset = 0;
   for prop in @properties
     field = prop.computedField
-    if (ty = field.type) instanceof StructType
+    if (fty = field.type) instanceof StructType
       cumulativeOffset += field.offset
     else
-      v = makeDeref v, field.offset + cumulativeOffset, ty
+      v = makeDeref v, vty, field.offset + cumulativeOffset, fty
+      vty = fty
       cumulativeOffset = 0
-  if ty instanceof StructType and cumulativeOffset isnt 0
+  if fty instanceof StructType and cumulativeOffset isnt 0
     # This is not a pointer, but transform a pointer anyways so memcpy can
     # work. Typechecking ensures that this isn't used like a pointer.
     new Op '+', v, new Value new Literal cumulativeOffset
@@ -614,19 +706,19 @@ Value::transform = (o) ->
 # Do struct copy semantics here since it requires a non-local transformation,
 # i.e. it can't be compiled by transforming the lval and rval individually.
 Assign::transform = (o) ->
-  return unless ty = @computedType
-  lval = @variable.unwrapAll()
-  context = @context
-  if (context is '+=' or context is '-=')
-    lty = lval.computedType
+  return unless lty = @computedType
+  if lty instanceof PointerType
     rty = @value.unwrapAll().computedType
-    if lty instanceof PointerType and rty in primTys
-      @value = multExpr @value, lty.base.size
-      return
-    else if lty instanceof PointerType and rty instanceof PointerType
-      return offsetExpr this, 0, lty.base.size
-  else if ty instanceof StructType
-    inlineMemcpy (if lval.isDeref?() then lval.first else @variable), @value, ty, o
+    if rty instanceof PointerType
+      lalign = lty.baseAlignment()
+      ralign = rty.baseAlignment()
+      @value = normalizePtr @value, lalign, ralign
+    else if rty in primTys and (au = alignmentUnits lty.base) isnt 1
+      @value = new Op('*', @value, new Value new Literal au)
+    return
+  if lty instanceof StructType
+    lval = @variable.unwrapAll()
+    inlineMemcpy (if lval.isDeref?() then lval.first else @variable), @value, lty, o
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
@@ -642,31 +734,51 @@ Op::transform = (o) ->
       new Call FREE, [@first]
     else if op is 'sizeof'
       new Literal @first.size
-    else if op is '&'
-      @first
+    else if op is '&' and ty1 = @computedType.base
+      if (inner = @first.unwrapAll()) instanceof Literal and o.frameSize
+        spOffsets = o.spOffsets
+        if (name = inner.value) of spOffsets
+          stackOffsetExpr spOffsets[name], ty1
+      else
+        @first
     else if op is '*'
       # This is only called when this deref is _not_ the base of a struct
       # access, as in struct accesses, dereferencing is the same as not
       # dereferencing, since . is extended to work like -> in C.
-      makeDeref @first, 0, @first.computedType
-    else if (op is '++' or op is '--') and (ty1 = @computedType) instanceof PointerType
+      ty1 = @first.computedType
+      makeDeref @first, ty1, 0, ty1
+    else if (op is '++' or op is '--') and
+            (ty1 = @computedType) instanceof PointerType and
+            (au = alignmentUnits ty1.base) isnt 1
       # If p :: *T, p++ desugars to (p += sizeof T, p - sizeof T).
-      size = new Value new Literal ty1.base.size
-      new Value new Parens new Block [new Assign(@first, size, '+='), new Op('-', @first, size)]
+      size = new Value new Literal au
+      if op is '++'
+        op1 = '+='
+        op2 = '-'
+      else
+        op1 = '-='
+        op2 = '-'
+      new Value new Parens new Block [new Assign(@first, size, op1),
+                                      new Op(op2, @first, size)]
   else
     ty1 = @first.computedType
     ty2 = @second.computedType
-    if (op is '+' or op is '-') and ty1 instanceof PointerType and ty2 in primTys
-      new Op op, @first, multExpr(@second, ty1.base.size)
-    else if (op is '+' or op is '-') and ty1 in primTys and ty2 instanceof PointerType
-      new Op op, multExpr(@first, ty2.base.size), @second
-    else if op is '-' and ty1 instanceof PointerType
-      this.transform = null
-      # Typechecking already ensures that ty2 is ty1.
-      offsetExpr this, 0, ty1.base.size
-
-# Pointers are 4-byte aligned for now.
-PointerType::view = U32
+    if (op is '+' or op is '-') and
+       ((ty1 instanceof PointerType and ty2 in primTys and
+         (au = alignmentUnits ty1.base) isnt 1) or
+        (ty2 instanceof PointerType and ty1 in primTys and
+         (au = alignmentUnits ty2.base) isnt 1))
+      size = new Value new Literal au
+      if ty1 instanceof PointerType
+        new Op op, @first, new Op('*', @second, size)
+      else
+        new Op op, new Op('*', @first, size), @second
+    else if op in COMPARE and
+         ty1 instanceof PointerType and ty2 instanceof PointerType
+      lalign = ty1.baseAlignment()
+      ralign = ty2.baseAlignment()
+      # By convention always normalize the second operand.
+      new Op op, @first, normalizePtr(@second, lalign, ralign)
 
 # Primitive types as found in C.
 class PrimitiveType
@@ -680,8 +792,15 @@ byteTy   = new PrimitiveType 1, 'byte',  U8,  no
 shortTy  = new PrimitiveType 2, 'short', I16, yes
 intTy    = new PrimitiveType 4, 'int',   I32, yes
 uintTy   = new PrimitiveType 4, 'uint',  U32, no
+
 # Sized primitive types.
 primTys  = [ byteTy, shortTy, intTy, uintTy ]
+
+# The local stack pointer is a u32.
+SP.computedType = uintTy
+# The actual stack pointer is a u8.
+SPREAL.computedType = byteTy
+SPREAL.transform = null
 
 requireExpr = (name) ->
   new Call new Value(new Literal 'require'), [new Value new Literal "'#{name}'"]
@@ -712,7 +831,7 @@ exports.analyzeTypes = (root, o) ->
   root.transformRoot = (o) ->
     exprs = @expressions
     # Do the stack fence for the module.
-    stackFence o, @expressions, frameSize, yes if frameSize = scope.frameSize
+    stackFence @expressions, frameSize, yes if frameSize = scope.frameSize
     # Bring in malloc if this module needs it.
     if scope.needsMalloc
       obj = new Value new Obj [MALLOC, FREE]

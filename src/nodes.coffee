@@ -247,8 +247,6 @@ exports.Block = class Block extends Base
   # It would be better not to generate them in the first place, but for now,
   # clean up obvious double-parentheses.
   compileRoot: (o) ->
-    o.spOffsets = @spOffsets
-    o.frameSize = @frameSize
     o.indent    = if o.bare then '' else TAB
     o.scope     = new Scope null, this, null
     o.level     = LEVEL_TOP
