@@ -668,24 +668,37 @@ Call::transform = (o) ->
       args[i] = normalizePtr args[i], lalign, ralign
   return
 
+# Transform stack allocated variables to dereference sp + offset.
+Literal::transform = (o) ->
+  return unless (ty = @computedType) and o.frameSize
+  spOffsets = o.spOffsets
+  if (name = @value) of spOffsets
+    new Value U32, [new Index stackOffsetExpr spOffsets[name], ty]
+
+# Transform stack allocated variables to sp + offset only, no dereference.
+stackOffsetTransform = (o) ->
+  stackOffsetExpr o.spOffsets[@value], @computedType
+
 # Transform this Value into a new Value that does offset index lookups on
 # the heap.
 Value::transform = (o) ->
   return unless @computedType
-  base  = @base
-  inner = base.unwrapAll()
   props = @properties
-  # Transform stack allocated variables to sp + offset.
-  if inner instanceof Literal and o.frameSize
-    spOffsets = o.spOffsets
-    if (name = inner.value) of spOffsets
-      stackDeref = new Value U32, [new Index stackOffsetExpr spOffsets[name], @computedType]
-      if props.length then (base = stackDeref) else return stackDeref
   # Non-access values get transformed at the inner level.
   return unless props.length
+  base  = @base
+  inner = base.unwrapAll()
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
-  v = if inner.isDeref?() then inner.first else base
+  v = if inner.isDeref?()
+    inner.first
+  else if inner.computedType instanceof PointerType
+    base
+  else
+    # If it's not a pointer access and not a dereference, the base must be
+    # stack allocated. Make sure it gets transformed into an offset.
+    base.transform = stackOffsetTransform
+    base
   vty = v.computedType
   cumulativeOffset = 0
   for prop in @properties
