@@ -420,7 +420,7 @@ exports.DeclareType = class DeclareType extends Base
       if scope.parent?.check name
         throw TypeError "type for `#{name}' not declared in the same scope"
       scope.find name
-      v.compile o, LEVEL_LIST
+      name
     "#{o.indent}// #{names.join(', ')} :: #{@type}"
 
   toString: (idt = '') ->
@@ -1265,10 +1265,9 @@ exports.Code = class Code extends Base
   # arrow, generates a wrapper that saves the current value of `this` through
   # a closure.
   compileNode: (o) ->
-    o.spOffsets     = @spOffsets
-    o.frameSize     = @frameSize
     o.scope         = new Scope o.scope, @body, this
-    o.scope.shared  = del(o, 'sharedScope')
+    unless o.scope.shared = del(o, 'sharedScope')
+      o.frameSize   = @frameSize
     o.indent        += TAB
     delete o.bare
     delete o.isExistentialEquals

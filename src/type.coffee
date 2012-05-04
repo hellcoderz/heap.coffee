@@ -9,7 +9,7 @@
 # external typed stuff unsafe casts are required.
 
 {Scope} = require './scope'
-{Base, Parens, Block, Value, Literal, Op, Assign, Try,
+{Base, Parens, Block, Value, Literal, Op, Assign, Try, If, Switch,
  Code, Index, Access, Call, Return, Obj, While, Comment,
  TypeAssign, DeclareType, Cast,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
@@ -318,8 +318,52 @@ unify = (types, lty, rty, assign) ->
 # Is this Op a dereference?
 Op::isAssignable = Op::isDeref = -> not @second and @operator is '*'
 
-# By default, computeType returns undefined, which means dynamic.
-Base::computeType = (r, o) ->
+# A block gets the type of its tail expression.
+Block::computeType = (r, o) ->
+  # A block of only one item will be taken care of by unwrapAll.
+  exprs = @expressions
+  return unless exprs.length > 1
+  return @computedType if @typeCached
+  @typeCached = true
+  @computedType = exprs[exprs.length - 1].unwrapAll().computedType
+
+# An if gets the unified type of both of its branches.
+If::computeType = (r, o) ->
+  return @computedType if @typeCached
+  @typeCached = true
+  thenTy = @body?.unwrapAll().computedType
+  elseTy = @elseBody?.unwrapAll().computedType
+  @computedType = ty = unify o.types, thenTy, elseTy
+  if (thenTy or elseTy) and not ty
+    printWarn "branches of if have different types: `#{tystr(thenTy)}' and `#{tystr(elseTy)}'"
+
+# A switch gets the unified type of all its cases.
+Switch::computeType = (r, o) ->
+  return @computedType if @typeCached
+  @typeCached = true
+  types = o.types
+  caseTys = []
+  someCaseJumps = false
+  someCaseTyped = false
+  for [conds, block], i in @cases
+    if block.jumps()
+      ty = null
+      someCaseJumps = true
+    else
+      ty = block.unwrapAll().computedType
+    caseTys.push ty
+    someCaseTyped = true if ty
+    if i is 0
+      cty = ty
+    else
+      cty = unify types, ty, cty
+  cty = unify types, @otherwise.unwrapAll().computedType, cty if @otherwise
+  if someCaseTyped and not cty
+    if someCaseJumps
+      printWarn "cannot type switch with jumps"
+    else
+      printWarn "branches of switch have different types: `#{(tystr(ty) for ty in caseTys).join('\', `')}'"
+  @computedType = cty
 
 # Casting coerces the expression to a certain type.
 Cast::computeType = (r, o) ->
@@ -334,7 +378,7 @@ Literal::computeType = (r, o) ->
   @computedType = if @value is 'null'
     anyPtrTy
   else if @isAssignable()
-    o.scope.binding(@value)?.type
+    (@computedBinding = o.scope.binding @value)?.type
   else if @isSimpleNumber()
     i32ty
   else if not isNaN Number @value
@@ -387,14 +431,14 @@ Code::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
   # Cache the stack-allocated variables and their offsets.
-  @spOffsets = spOffsetMap o.scope
+  @spOffsets = spOffsets o.scope
   @frameSize = o.scope.frameSize
   # Arriving in this function means that all the parameters typechecked, since
   # this is called after the body has been processed. So we just need to
   # collect the return expressions and compatible their types.
   types = o.types
-  for rexpr in returnExpressions @body
-    unless rty
+  for rexpr, i in returnExpressions @body
+    if i is 0
       rty = rexpr.unwrapAll().computedType
     else
       rty = unify types, rexpr.unwrapAll().computedType, rty
@@ -607,15 +651,15 @@ putOnStack = (scope, name) ->
   bind = scope.binding name, true
   bind.onStack = true
   bind.spOffset = alignOffset scope.frameSize, bind.type
-  scope.frameSize += bind.spOffset + bind.type.size
+  scope.frameSize = bind.spOffset + bind.type.size
   return
 
 # Condense a typed scope to a map of variable names to sp offsets.
-spOffsetMap = (scope) ->
-  map = {}
+spOffsets = (scope) ->
+  offsets = []
   for { name, type: bind } in scope.variables when bind.onStack
-    map[name] = bind.spOffset
-  map
+    offsets.push { name, offset: bind.spOffset, ty: bind.type }
+  offsets
 
 # Dereference something in a heap view.
 makeDeref = (o, base, baseTy, offset, offsetTy) ->
@@ -627,9 +671,11 @@ inlineMemcpy = (o, dest, src, ty) ->
   stmts = []
   # Store the pointer to the struct we're copying to.
   destPtr = new Literal scope.freeVariable 'dest'
+  destPtr.computedType = dest.computedType
   stmts.push new Assign new Value(destPtr), dest
   # Store the pointer to the struct we're copying from.
   srcPtr = new Literal scope.freeVariable 'src'
+  srcPtr.computedType = src.computedType
   stmts.push new Assign new Value(srcPtr), src
   # Unroll the copy loop over the bytes.
   if ty instanceof StructType
@@ -677,7 +723,13 @@ structLiteral = (v, ty, o) ->
 # try..finally block to account for possible throws. If the user indicated
 # gotta-go-fast, we'll only emit stack pointer computations for explicit
 # returns.
-stackFence = (o, exprs, frameSize, isRoot) ->
+stackFence = (o, exprs, frameSize, spOffsets, isRoot) ->
+  # The stack uses U32, so record it manually.
+  U32(o)
+  # Assign all the on-stack locals to their addresses.
+  scope = o.scope
+  for { name, offset, ty } in spOffsets
+    exprs.unshift new Assign new Value(new Literal name), stackOffsetExpr(offset, ty)
   exprs.unshift new Assign SP, normalizePtr(SPREAL, U32.BYTES_PER_ELEMENT, 1)
   exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
@@ -686,10 +738,9 @@ stackFence = (o, exprs, frameSize, isRoot) ->
   else
     exprs[0] = new Try new Block(exprs.slice()), null, null, new Block [restoreStack]
     exprs.length = 1
-  # The stack uses U32, so record it manually.
-  U32(o)
   return
 
+# Coerce to a type.
 Cast::transform = (r, o) ->
   return @computedType.coerce?(@expr)
 
@@ -697,9 +748,8 @@ Cast::transform = (r, o) ->
 Code::transform = (o) ->
   o.returnType = @computedType?.ret
   if frameSize = @frameSize
-    o.spOffsets = @spOffsets
     o.frameSize = frameSize
-    stackFence o, @body.expressions, frameSize
+    stackFence o, @body.expressions, frameSize, @spOffsets
   return
 
 # Add SP computation and pointer conversions to explicit returns.
@@ -729,16 +779,14 @@ Call::transform = (o) ->
 # Transform stack allocated variables to dereference sp + offset.
 Literal::transform = (o) ->
   return unless ty = @computedType
-  # This matters for TI: null will cause the typeset of pointers to be dimorphic.
+  # This matters for TI: null will cause the typeset of pointers to be
+  # dimorphic.
   @value = '0' if @value is 'null' and ty instanceof PointerType
-  return unless o.frameSize
-  spOffsets = o.spOffsets
-  if (name = @value) of spOffsets
-    new Value U32(o), [new Index stackOffsetExpr spOffsets[name], ty]
-
-# Transform stack allocated variables to sp + offset only, no dereference.
-stackOffsetTransform = (o) ->
-  stackOffsetExpr o.spOffsets[@value], @computedType
+  # Treat stack accesses as dereferences, except for structs, which are kept
+  # as offsets. FIXME: it's unclear what raw use of a stack-allocated struct
+  # means right now.
+  if @computedBinding?.onStack and ty not instanceof StructType and not @noStackDeref
+    new Value U32(o), [new Index new Value new Literal @value]
 
 # Transform this Value into a new Value that does offset index lookups on
 # the heap.
@@ -751,16 +799,8 @@ Value::transform = (o) ->
   inner = base.unwrapAll()
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
-  v = if inner.isDeref?()
-    inner.first
-  else if inner.computedType instanceof PointerType
-    base
-  else
-    # If it's not a pointer access and not a dereference, the base must be
-    # stack allocated. Make sure it gets transformed into an offset.
-    base.transform = stackOffsetTransform
-    base
-  vty = v.computedType
+  v = if inner.isDeref?() then inner.first else base
+  vty = v.unwrapAll().computedType
   cumulativeOffset = 0
   for prop in @properties
     field = prop.computedField
@@ -803,12 +843,11 @@ Op::transform = (o) ->
     else if op is 'sizeof'
       new Literal @first.size
     else if op is '&' and ty1 = @computedType.base
-      if (inner = @first.unwrapAll()) instanceof Literal and o.frameSize
-        spOffsets = o.spOffsets
-        if (name = inner.value) of spOffsets
-          stackOffsetExpr spOffsets[name], ty1
-      else
-        @first
+      # The typechecker guarantees that `@first` is assignable, so if we're
+      # taking the address of a stack variable, `@first.unwrapAll()` must be
+      # the literal of that variable.
+      @first.unwrapAll().noStackDeref = true
+      @first
     else if op is '*'
       # This is only called when this deref is _not_ the base of a struct
       # access, as in struct accesses, dereferencing is the same as not
@@ -937,7 +976,7 @@ exports.analyzeTypes = (root, o) ->
   root.foldChildren null, 'declareType', null, options
   options.crossScope = true
   root.foldChildren null, 'primeComputeType', 'computeType', options
-  root.spOffsets = spOffsetMap scope
+  root.spOffsets = spOffsets scope
   root.frameSize = scope.frameSize
   root.transformRoot = (o) ->
     # Require the heap. This has to be done using o.scope.assign to make sure
@@ -945,7 +984,9 @@ exports.analyzeTypes = (root, o) ->
     o.scope.assign HEAP.base.value, "require('heap/heap')"
     # Do the stack fence for the module.
     exprs = @expressions
-    stackFence o, exprs, frameSize, yes if frameSize = scope.frameSize
+    if frameSize = @frameSize
+      o.frameSize = frameSize
+      stackFence o, exprs, frameSize, @spOffsets, yes
     # Bring in malloc if this module needs it.
     if scope.needsMalloc
       obj = new Value new Obj [MALLOC, FREE]
