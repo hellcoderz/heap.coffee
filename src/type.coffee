@@ -15,6 +15,12 @@
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend, tystr} = require './helpers'
 
+# Raise a type error.
+error = (node, msg) ->
+  err = new TypeError msg
+  err.lineno = node.lineno
+  throw err
+
 # The heap module that holds all the views.
 HEAP    = new Value new Literal '_HEAP'
 # Views.
@@ -77,7 +83,7 @@ normalizePtr = (ptr, lalign, ralign) ->
     op = '>>'
   # Pretty sure this is true all the time, commenting it out for now.
   # if ratio and not ((ratio & (ratio - 1)) is 0)
-  #   throw TypeError "ratio between primitive type sizes must be a power of 2"
+  #   error this, "ratio between primitive type sizes must be a power of 2"
   new Parens new Op op, ptr, new Value new Literal (Math.log(ratio) / Math.log(2))
 
 offsetExpr = (base, baseTy, offset, offsetTy) ->
@@ -156,10 +162,10 @@ alignmentUnits = (ty) -> ty.size / ty.view.BYTES_PER_ELEMENT
 #  - pointers can only be taken on type names
 #  - no subpart of a function type may be a function type
 TypeName::lint = (types) ->
-  throw TypeError "circular type synonym: #{@name}" if @linting
+  error this, "circular type synonym: #{@name}" if @linting
   return @linted if @linted
   @linting = true
-  throw TypeError "cannot resolve type `#{@name}'" unless @name of types
+  error this, "cannot resolve type `#{@name}'" unless @name of types
   linted = types[@name]?.lint types
   delete @linting
   @linted = linted
@@ -173,7 +179,7 @@ PointerType::lint = (types) ->
   @linted = true
   @base = base = @base.lint types
   if base and not base.size
-    throw TypeError "cannot take pointers of unsized type `#{base}'"
+    error this, "cannot take pointers of unsized type `#{base}'"
   this
 
 PointerType::coerce = (expr) ->
@@ -227,15 +233,15 @@ StructType::lint = (types) ->
   for field in fields
     ty = field.type
     unless ty.size
-      throw TypeError "cannot store unsized type `#{ty}' as a struct field"
+      error this, "cannot store unsized type `#{ty}' as a struct field"
     # Record the max view encountered to set as the view of this struct.
     maxView = ty.view if ty.view.BYTES_PER_ELEMENT > maxView.BYTES_PER_ELEMENT
     if (offset = field.offset)?
-      throw TypeError "struct field offsets cannot be negative" if offset < 0
+      error this, "struct field offsets cannot be negative" if offset < 0
       if offset < prev.offset
         printWarn "offset of field `#{field.name}' is smaller offset of previous field"
       if offset isnt alignOffset offset, ty
-        throw TypeError "manual offset [#{offset}] cannot be aligned to `#{ty}'"
+        error this, "manual offset [#{offset}] cannot be aligned to `#{ty}'"
     else if field.usePreviousOffset
       # If the previous offset isn't aligned to the current field's size, move
       # both up.
@@ -404,9 +410,9 @@ Assign::computeType = (r, o) ->
   unless @computedType
     msg = "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
     if context
-      throw TypeError msg + " using #{context}"
+      error @variable, msg + " using #{context}"
     else
-      throw TypeError msg
+      error @variable, msg
 
 # Accesses on struct types may be typed. If we arrived at this case it's
 # because unwrapAll() didn't manage to unwrap value, i.e. this is a properties
@@ -418,10 +424,10 @@ Value::computeType = (r, o) ->
     for prop in @properties
       baseTy = baseTy.base if baseTy instanceof PointerType
       return unless baseTy instanceof StructType
-      throw TypeError "cannot soak struct field names" if prop.soak
+      error this, "cannot soak struct field names" if prop.soak
       fieldName = prop.name.unwrapAll().value
       field = prop.computedField = baseTy.names[fieldName]
-      throw TypeError "unknown struct field name `#{fieldName}'" unless field
+      error this, "unknown struct field name `#{fieldName}'" unless field
       baseTy = field.type
     @computedType = baseTy
 
@@ -450,7 +456,7 @@ Call::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
   return unless fty = @variable?.unwrapAll().computedType
-  throw TypeError "calling a non-function type `#{fty}'" unless fty instanceof ArrowType
+  error this, "calling a non-function type `#{fty}'" unless fty instanceof ArrowType
   paramTys = fty.params
   args = @args
   types = o.types
@@ -459,7 +465,7 @@ Call::computeType = (r, o) ->
     # `undefined` and interpreted as the type `any`.
     aty = args[i]?.computedType
     if pty and not unify types, pty, aty, true
-      throw TypeError "incompatible types: passing arg `#{tystr(aty)}' to param `#{tystr(pty)}'"
+      error this, "incompatible types: passing arg `#{tystr(aty)}' to param `#{tystr(pty)}'"
   # If all the arguments checked, the call gets the return type.
   @computedType = fty.ret
 
@@ -478,7 +484,7 @@ binopType = (op, ty1, ty2) ->
         printWarn "pointer subtraction on incompatible pointer types `#{ty1}' and `#{ty2}'"
       i32ty
     else
-      throw TypeError "invalid operand type `#{ty2}' for pointer arithmetic"
+      error this, "invalid operand type `#{ty2}' for pointer arithmetic"
   else if op is '%'
     i32ty
   else if op in COMPARE
@@ -501,32 +507,32 @@ Op::computeType = (r, o) ->
     first = @first.unwrapAll()
     return @computedType = if op is 'new' and first.value of o.types
       ty1 = o.types[first.value]
-      throw TypeError "cannot allocate unsized type `#{ty1}'" unless ty1?.size
+      error this, "cannot allocate unsized type `#{ty1}'" unless ty1?.size
       Scope.root.needsMalloc = yes
       new PointerType ty1
     else if op is 'delete' and (ty1 = first.computedType)
-      throw TypeError 'cannot free non-pointer type' unless ty1 instanceof PointerType
+      error this, 'cannot free non-pointer type' unless ty1 instanceof PointerType
       Scope.root.needsMalloc = yes
       null
     else if op is 'sizeof'
       ty1 = @first = @first.lint o.types
-      throw TypeError "cannot determine size of type `#{ty1}'" unless ty1.size
+      error this, "cannot determine size of type `#{ty1}'" unless ty1.size
       i32ty
     else if op is '&' and (ty1 = first.computedType)
-      throw TypeError "taking reference of an untyped expression:\n#{@first}" unless ty1
-      throw TypeError "taking reference of a function type" if ty1 instanceof ArrowType
-      throw TypeError "taking reference of non-assignable" unless first.isAssignable()
+      error this, "taking reference of an untyped expression:\n#{@first}" unless ty1
+      error this, "taking reference of a function type" if ty1 instanceof ArrowType
+      error this, "taking reference of non-assignable" unless first.isAssignable()
       # Can't take references of upvars.
       if first instanceof Literal
         name  = first.value
         scope = o.scope
         unless scope.check name, true
-          throw TypeError "taking reference of non-local or undefined variable `#{name}'"
+          error this, "taking reference of non-local or undefined variable `#{name}'"
         putOnStack scope, name
       new PointerType ty1
     else if op is '*' and (ty1 = first.computedType)
-      throw TypeError "dereferencing an untyped expression:\n#{@first}" unless ty1
-      throw TypeError "dereferencing a non-pointer type" unless ty1 instanceof PointerType
+      error this, "dereferencing an untyped expression:\n#{@first}" unless ty1
+      error this, "dereferencing a non-pointer type" unless ty1 instanceof PointerType
       ty1.base
     else if (op is '++' or op is '--') and ty1 = first.computedType
       ty1 if ty1 instanceof PointerType or ty1 in integral
@@ -542,7 +548,7 @@ Op::computeType = (r, o) ->
 
   @computedType = if (op is '+' or op is '-') and ty1 instanceof PointerType
     unless ty2 in integral
-      throw TypeError "invalid operand type `#{ty2}' for pointer arithmetic"
+      error this, "invalid operand type `#{ty2}' for pointer arithmetic"
     ty1
   else if op is '-' and ty1 instanceof PointerType and ty2 instanceof PointerType
     unless unify o.types, ty1.base, ty2.base
@@ -621,11 +627,11 @@ Code::primeComputeType = (r, o) ->
   ptys = @paramTypes
   if ptys
     if ptys.length isnt @params.length
-      throw TypeError "arrow type has different number of parameters than function"
+      error this, "arrow type has different number of parameters than function"
     types = o.types
     for { name }, i in @params
       unless name instanceof Literal
-        throw TypeError "cannot type complex parameter `#{name}'"
+        error this, "cannot type complex parameter `#{name}'"
       # Lint just in case the user manually declared the parameter types and
       # thus the types were not linted before this point.
       ptys[i] = ptys[i].lint types
@@ -641,7 +647,7 @@ DeclareType::declareType = (r, o) ->
   scope = o.scope
   for v in @variables
     name = v.unwrapAll().value
-    throw TypeError "cannot redeclare typed variable `#{name}'" if scope.check name
+    error this, "cannot redeclare typed variable `#{name}'" if scope.check name
     scope.add name, new Binding type
     putOnStack scope, name if type instanceof StructType
   return

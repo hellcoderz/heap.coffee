@@ -37,7 +37,7 @@ o = (patternString, action, options) ->
   action = action.replace /\binstanceof /g, '$&yy.'
   action = action.replace /\bnew /g, '$&yy.'
   action = action.replace /\b(?:Block\.wrap|extend)\b/g, 'yy.$&'
-  [patternString, "$$ = #{action};", options]
+  [patternString, "$$ = #{action}; $$.lineno = yylineno;", options]
 
 # Grammatical Rules
 # -----------------
