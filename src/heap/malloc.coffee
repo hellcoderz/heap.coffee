@@ -15,7 +15,7 @@ malloc = (nbytes) ->
   p, prevp :: *header
   nunits   :: uint
 
-  nunits = ((nbytes + sizeof header - 1) / sizeof header + 1) >> 0
+  nunits = (nbytes + sizeof header - 1) / sizeof header + 1
   unless prevp = freep
     # Haven't allocated a free list yet, do it now.
     prevp = freep = _U32[0] as *any
