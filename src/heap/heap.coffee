@@ -7,17 +7,17 @@ HEAPSIZE = 1024 * 1024
 
 buf = new ArrayBuffer HEAPSIZE
 
-exports. _I8 = new   Int8Array buf
-exports. _U8 = new  Uint8Array buf
-exports._I16 = new  Int16Array buf
-exports._U16 = new Uint16Array buf
-exports._I32 = new  Int32Array buf
-exports._U32 = new Uint32Array buf
+exports. I8 = new   Int8Array buf
+exports. U8 = new  Uint8Array buf
+exports.I16 = new  Int16Array buf
+exports.U16 = new Uint16Array buf
+exports.I32 = new  Int32Array buf
+exports.U32 = new Uint32Array buf
 
 # The first int32 in the heap is the heap pointer, pointing to where the
 # heap starts in bytes. This grows down.
-exports._U32[0] = 8
+exports.U32[0] = 8
 
 # The second int32 in the heap is the stack pointer, pointing to where the
 # stack starts in bytes. This grows up.
-exports._U32[1] = HEAPSIZE
+exports.U32[1] = HEAPSIZE

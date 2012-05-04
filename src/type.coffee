@@ -15,21 +15,37 @@
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend, tystr} = require './helpers'
 
+# The heap module that holds all the views.
+HEAP    = new Value new Literal '_HEAP'
 # Views.
-I8      = new Literal '_I8'
-U8      = new Literal '_U8'
-I16     = new Literal '_I16'
-U16     = new Literal '_U16'
-I32     = new Literal '_I32'
-U32     = new Literal '_U32'
+I8V     = new Literal '_I8'
+U8V     = new Literal '_U8'
+I16V    = new Literal '_I16'
+U16V    = new Literal '_U16'
+I32V    = new Literal '_I32'
+U32V    = new Literal '_U32'
 # The cached stack pointer.
 SP      = new Value new Literal '_SP'
 # The actual stack pointer.
-SPREAL  = new Value U32, [new Index new Value new Literal 1]
+SPREAL  = new Value U32V, [new Index new Value new Literal 1]
 # Memory operations.
 MALLOC  = new Value new Literal 'malloc'
 FREE    = new Value new Literal 'free'
 MEMCPY  = new Value new Literal 'memcpy'
+
+# Functions to get to the views, but also record in the scope that the view
+# has been used so we can bring it in.
+recorderForView = (view) -> (o) ->
+  name = view.value
+  # The exported view from the heap module doesn't start with underscores.
+  o.scope.assign name, "#{HEAP.base.value}.#{name.substr name.lastIndexOf('_') + 1}"
+  view
+I8  = recorderForView I8V
+U8  = recorderForView U8V
+I16 = recorderForView I16V
+U16 = recorderForView U16V
+I32 = recorderForView I32V
+U32 = recorderForView U32V
 
 # Used to compute shifts.
 I8.BYTES_PER_ELEMENT  = U8.BYTES_PER_ELEMENT  = 1
@@ -398,10 +414,12 @@ Op::computeType = (r, o) ->
     return @computedType = if op is 'new' and first.value of o.types
       ty1 = o.types[first.value]
       throw TypeError 'cannot allocate type with size 0' unless ty1?.size
+      Scope.root.needsMalloc = yes
       new PointerType ty1
     else if op is 'delete' and (ty1 = first.computedType)
       throw TypeError 'cannot free non-pointer type' unless ty1 instanceof PointerType
-      unitTy
+      Scope.root.needsMalloc = yes
+      null
     else if op is 'sizeof'
       ty1 = @first = @first.lint o.types
       throw TypeError "cannot determine size of type `#{ty1}'" unless ty1.size
@@ -544,6 +562,7 @@ putOnStack = (scope, name) ->
   bind.onStack = true
   bind.spOffset = alignOffset scope.frameSize, bind.type
   scope.frameSize += bind.spOffset + bind.type.size
+  return
 
 # Condense a typed scope to a map of variable names to sp offsets.
 spOffsetMap = (scope) ->
@@ -553,11 +572,11 @@ spOffsetMap = (scope) ->
   map
 
 # Dereference something in a heap view.
-makeDeref = (base, baseTy, offset, offsetTy) ->
-  new Value offsetTy.view, [new Index offsetExpr base, baseTy, offset, offsetTy]
+makeDeref = (o, base, baseTy, offset, offsetTy) ->
+  new Value offsetTy.view(o), [new Index offsetExpr base, baseTy, offset, offsetTy]
 
 # Generate an inline memcpy.
-inlineMemcpy = (dest, src, ty, o) ->
+inlineMemcpy = (o, dest, src, ty) ->
   scope = o.scope
   stmts = []
   # Store the pointer to the struct we're copying to.
@@ -585,8 +604,8 @@ inlineMemcpy = (dest, src, ty, o) ->
   else
     for i in [0...ty.size]
       offset = new Value new Literal i
-      stmts.push new Assign new Value(U8, [new Index new Op '+', new Value(destPtr), offset]),
-                            new Value(U8, [new Index new Op '+', new Value(srcPtr), offset])
+      stmts.push new Assign new Value(U8(o), [new Index new Op '+', new Value(destPtr), offset]),
+                            new Value(U8(o), [new Index new Op '+', new Value(srcPtr), offset])
   stmts.push new Value destPtr
   new Value new Parens new Block stmts
 
@@ -612,7 +631,7 @@ structLiteral = (v, ty, o) ->
 # try..finally block to account for possible throws. If the user indicated
 # gotta-go-fast, we'll only emit stack pointer computations for explicit
 # returns.
-stackFence = (exprs, frameSize, isRoot) ->
+stackFence = (o, exprs, frameSize, isRoot) ->
   exprs.unshift new Assign SP, normalizePtr(SPREAL, U32.BYTES_PER_ELEMENT, 1)
   exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
@@ -621,6 +640,8 @@ stackFence = (exprs, frameSize, isRoot) ->
   else
     exprs[0] = new Try new Block(exprs.slice()), null, null, new Block [restoreStack]
     exprs.length = 1
+  # The stack uses U32, so record it manually.
+  U32(o)
   return
 
 Cast::transform = (r, o) ->
@@ -629,13 +650,13 @@ Cast::transform = (r, o) ->
   return unless lty instanceof PointerType and rty instanceof PointerType
   normalizePtr @expr, lty.baseAlignment(), rty.baseAlignment()
 
-# Add SP computations if needed.
+# Add SP computations and bring in heap views if needed.
 Code::transform = (o) ->
   o.returnType = @computedType?.ret
-  return unless frameSize = @frameSize
-  o.spOffsets = @spOffsets
-  o.frameSize = frameSize
-  stackFence @body.expressions, frameSize
+  if frameSize = @frameSize
+    o.spOffsets = @spOffsets
+    o.frameSize = frameSize
+    stackFence o, @body.expressions, frameSize
   return
 
 # Add SP computation and pointer conversions to explicit returns.
@@ -676,7 +697,7 @@ Literal::transform = (o) ->
   return unless o.frameSize
   spOffsets = o.spOffsets
   if (name = @value) of spOffsets
-    new Value U32, [new Index stackOffsetExpr spOffsets[name], ty]
+    new Value U32(o), [new Index stackOffsetExpr spOffsets[name], ty]
 
 # Transform stack allocated variables to sp + offset only, no dereference.
 stackOffsetTransform = (o) ->
@@ -709,7 +730,7 @@ Value::transform = (o) ->
     if (fty = field.type) instanceof StructType
       cumulativeOffset += field.offset
     else
-      v = makeDeref v, vty, field.offset + cumulativeOffset, fty
+      v = makeDeref o, v, vty, field.offset + cumulativeOffset, fty
       vty = fty
       cumulativeOffset = 0
   if fty instanceof StructType and cumulativeOffset isnt 0
@@ -734,19 +755,17 @@ Assign::transform = (o) ->
     return
   if lty instanceof StructType
     lval = @variable.unwrapAll()
-    inlineMemcpy (if lval.isDeref?() then lval.first else @variable), @value, lty, o
+    inlineMemcpy o, (if lval.isDeref?() then lval.first else @variable), @value, lty
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
 Op::transform = (o) ->
-  return unless @computedType
+  return unless @computedType or @first.computedType
   op = @operator
   if @isUnary()
     if op is 'new' and ty1 = @computedType
-      o.scope.root.needsMalloc = yes
-      new Call MALLOC, [new Value new Literal ty.base.size]
+      new Call MALLOC, [new Value new Literal ty1.base.size]
     else if op is 'delete'
-      o.scope.root.needsMalloc = yes
       new Call FREE, [@first]
     else if op is 'sizeof'
       new Literal @first.size
@@ -762,7 +781,7 @@ Op::transform = (o) ->
       # access, as in struct accesses, dereferencing is the same as not
       # dereferencing, since . is extended to work like -> in C.
       ty1 = @first.computedType
-      makeDeref @first, ty1, 0, ty1
+      makeDeref o, @first, ty1, 0, ty1
     else if (op is '++' or op is '--') and
             (ty1 = @computedType) instanceof PointerType and
             (au = alignmentUnits ty1.base) isnt 1
@@ -845,17 +864,14 @@ exports.analyzeTypes = (root, o) ->
   root.spOffsets = spOffsetMap scope
   root.frameSize = scope.frameSize
   root.transformRoot = (o) ->
-    exprs = @expressions
+    # Require the heap. This has to be done using o.scope.assign to make sure
+    # that it comes before the cached views.
+    o.scope.assign HEAP.base.value, "require('heap/heap')"
     # Do the stack fence for the module.
-    stackFence @expressions, frameSize, yes if frameSize = scope.frameSize
+    exprs = @expressions
+    stackFence o, exprs, frameSize, yes if frameSize = scope.frameSize
     # Bring in malloc if this module needs it.
     if scope.needsMalloc
       obj = new Value new Obj [MALLOC, FREE]
       exprs.unshift new Assign obj, requireExpr 'heap/malloc'
-    # Bring in the heap views.
-    props = []
-    props.push new Value view for view in [I8, U8, I16, U16, I32, U32]
-    obj = new Value new Obj props
-    exprs.unshift new Assign obj, requireExpr 'heap/heap'
-
   types
