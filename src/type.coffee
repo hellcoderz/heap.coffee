@@ -163,9 +163,9 @@ PointerType::view = U32
 PointerType::lint = (types) ->
   return this if @linted
   @linted = true
-  @base = @base.lint types
-  if @base instanceof ArrowType
-    throw TypeError "cannot take pointers of function types"
+  @base = base = @base.lint types
+  if base and not base.size
+    throw TypeError "cannot take pointers of unsized type `#{base}'"
   this
 PointerType::baseAlignment = -> @base?.view.BYTES_PER_ELEMENT or 1
 
@@ -211,6 +211,8 @@ StructType::lint = (types) ->
   # Field offsets must be aligned to the type of the field.
   for field in fields
     ty = field.type
+    unless ty.size
+      throw TypeError "cannot store unsized type `#{ty}' as a struct field"
     # Record the max view encountered to set as the view of this struct.
     maxView = ty.view if ty.view.BYTES_PER_ELEMENT > maxView.BYTES_PER_ELEMENT
     if (offset = field.offset)?
@@ -413,7 +415,7 @@ Op::computeType = (r, o) ->
     first = @first.unwrapAll()
     return @computedType = if op is 'new' and first.value of o.types
       ty1 = o.types[first.value]
-      throw TypeError 'cannot allocate type with size 0' unless ty1?.size
+      throw TypeError "cannot allocate unsized type `#{ty1}'" unless ty1?.size
       Scope.root.needsMalloc = yes
       new PointerType ty1
     else if op is 'delete' and (ty1 = first.computedType)
