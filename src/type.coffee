@@ -24,6 +24,8 @@ I16V    = new Literal '_I16'
 U16V    = new Literal '_U16'
 I32V    = new Literal '_I32'
 U32V    = new Literal '_U32'
+F32V    = new Literal '_F32'
+F64V    = new Literal '_F64'
 # The cached stack pointer.
 SP      = new Value new Literal '_SP'
 # The actual stack pointer.
@@ -46,11 +48,15 @@ I16 = recorderForView I16V
 U16 = recorderForView U16V
 I32 = recorderForView I32V
 U32 = recorderForView U32V
+F32 = recorderForView F32V
+F64 = recorderForView F64V
 
 # Used to compute shifts.
 I8.BYTES_PER_ELEMENT  = U8.BYTES_PER_ELEMENT  = 1
 I16.BYTES_PER_ELEMENT = U16.BYTES_PER_ELEMENT = 2
 I32.BYTES_PER_ELEMENT = U32.BYTES_PER_ELEMENT = 4
+F32.BYTES_PER_ELEMENT = 4
+F64.BYTES_PER_ELEMENT = 8
 
 # Global option for if we should print warnings.
 opts = { warn: false, unsafe: false }
@@ -160,6 +166,8 @@ TypeName::lint = (types) ->
 
 PointerType::size = 4
 PointerType::view = U32
+PointerType::baseAlignment = -> @base?.view.BYTES_PER_ELEMENT or 1
+
 PointerType::lint = (types) ->
   return this if @linted
   @linted = true
@@ -167,11 +175,18 @@ PointerType::lint = (types) ->
   if base and not base.size
     throw TypeError "cannot take pointers of unsized type `#{base}'"
   this
-PointerType::baseAlignment = -> @base?.view.BYTES_PER_ELEMENT or 1
+
+PointerType::coerce = (expr) ->
+  ty = expr.unwrapAll().computedType
+  return expr unless ty instanceof PointerType and ty isnt this
+  normalizePtr expr, this.baseAlignment(), ty.baseAlignment()
 
 StructType::lint = (types) ->
   return this if @linted
   @linted = true
+  # Have a fake non-0 size for now to deal with recursive linting so pointers
+  # don't complain.
+  @size = 1
   fields = @fields
   field.type = field.type.lint types for field in fields
   # Make an imaginary first field whose offset and size is 0.
@@ -281,14 +296,14 @@ unify = (types, lty, rty, assign) ->
     for lpty, i in lptys
       ptys.push unify types, lpty, rptys[i], assign
     return new ArrowType ptys, unify(types, lty.ret, rty.ret, assign)
-  if lty instanceof PointerType and rty in primTys
+  if lty instanceof PointerType and rty in integral
     printWarn "conversion from `#{rty}' to pointer without cast"
     return lty
-  if lty in primTys and rty instanceof PointerType
+  if lty in integral and rty instanceof PointerType
     printWarn "conversion from pointer to `#{lty}' without cast"
     return lty
   # Primitive types follow C-like promotion rules.
-  if lty in primTys and rty in primTys
+  if lty in numeric and rty in numeric
     # If we're assigning, return the left type, else return the wider primitive.
     if lty.size isnt rty.size
       printWarn "conversion from `#{rty}' to `#{lty}' may alter its value"
@@ -321,7 +336,9 @@ Literal::computeType = (r, o) ->
   else if @isAssignable()
     o.scope.binding(@value)?.type
   else if @isSimpleNumber()
-    intTy
+    i32ty
+  else if not isNaN Number @value
+    f64ty
 
 # Assignments do asymmetric type unification.
 Assign::computeType = (r, o) ->
@@ -335,14 +352,17 @@ Assign::computeType = (r, o) ->
   if lty instanceof PointerType and value instanceof Literal and value.value is '0'
     value.computedType = anyPtrTy
   rty = value.computedType
-  # Handle pointer arithmetic complex assignments.
   context = @context
-  if (context is '+=' or context is '-=') and lty instanceof PointerType and rty in primTys
-    return @computedType = lty
-  else if context is '-=' and lty instanceof PointerType and rty instanceof PointerType
-    return @computedType = intTy if unify o.types, lty.base, rty.base
-  unless @computedType = unify o.types, lty, rty, true
-    throw TypeError "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
+  @computedType = if context
+    binopType context.substr(0, context.indexOf('=')), lty, rty
+  else
+    unify o.types, lty, rty, true
+  unless @computedType
+    msg = "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
+    if context
+      throw TypeError msg + " using #{context}"
+    else
+      throw TypeError msg
 
 # Accesses on struct types may be typed. If we arrived at this case it's
 # because unwrapAll() didn't manage to unwrap value, i.e. this is a properties
@@ -405,6 +425,28 @@ ARITH   = [ '+', '-', '*', '/' ]
 BITWISE = [ '<<', '>>', '>>>', '~', '&', '|' ]
 COMPARE = [ '===', '!==', '<', '>', '<=', '>=' ]
 
+binopType = (op, ty1, ty2) ->
+  if (op is '+' or op is '-') and ty1 instanceof PointerType
+    if ty2 in integral
+      ty1
+    else if op is '-' and ty2 instanceof PointerType
+      unless unify o.types, ty1.base, ty2.base
+        printWarn "pointer subtraction on incompatible pointer types `#{ty1}' and `#{ty2}'"
+      i32ty
+    else
+      throw TypeError "invalid operand type `#{ty2}' for pointer arithmetic"
+  else if op is '%'
+    i32ty
+  else if op in COMPARE
+    if ty1 instanceof PointerType and ty2 instanceof PointerType and
+       not unify o.types, ty1, ty2
+      printWarn "comparison between incompatible pointer types `#{ty1}' and `#{ty2}'"
+    i32ty
+  else if op in BITWISE
+    i32ty
+  else if op in ARITH and ty1 in numeric and ty2 in numeric
+    f64ty
+
 Op::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
@@ -425,7 +467,7 @@ Op::computeType = (r, o) ->
     else if op is 'sizeof'
       ty1 = @first = @first.lint o.types
       throw TypeError "cannot determine size of type `#{ty1}'" unless ty1.size
-      intTy
+      i32ty
     else if op is '&' and (ty1 = first.computedType)
       throw TypeError "taking reference of an untyped expression:\n#{@first}" unless ty1
       throw TypeError "taking reference of a function type" if ty1 instanceof ArrowType
@@ -443,7 +485,7 @@ Op::computeType = (r, o) ->
       throw TypeError "dereferencing a non-pointer type" unless ty1 instanceof PointerType
       ty1.base
     else if (op is '++' or op is '--') and ty1 = first.computedType
-      ty1 if ty1 instanceof PointerType or ty1 in primTys
+      ty1 if ty1 instanceof PointerType or ty1 in integral
 
   ty1 = @first.unwrapAll().computedType
   ty2 = @second.unwrapAll().computedType
@@ -454,23 +496,25 @@ Op::computeType = (r, o) ->
     ty1 = ty2
     ty2 = tmp
 
-  @computedType = if (op is '+' or op is '-') and ty1 instanceof PointerType and ty2 in primTys
+  @computedType = if (op is '+' or op is '-') and ty1 instanceof PointerType
+    unless ty2 in integral
+      throw TypeError "invalid operand type `#{ty2}' for pointer arithmetic"
     ty1
   else if op is '-' and ty1 instanceof PointerType and ty2 instanceof PointerType
     unless unify o.types, ty1.base, ty2.base
       printWarn "pointer subtraction on incompatible pointer types `#{ty1}' and `#{ty2}'"
-    intTy
+    i32ty
   else if op is '%'
-    intTy
+    i32ty
   else if op in COMPARE
     if ty1 instanceof PointerType and ty2 instanceof PointerType and
        not unify o.types, ty1, ty2
       printWarn "comparison between incompatible pointer types `#{ty1}' and `#{ty2}'"
-    intTy
+    i32ty
   else if op in BITWISE
-    intTy
-  else if op in ARITH and ty1 in primTys and ty2 in primTys
-    unify o.types, ty1, ty2
+    i32ty
+  else if op in ARITH and ty1 in numeric and ty2 in numeric
+    f64ty
 
 # Gather return expressions.
 returnExpressions = (body) ->
@@ -647,10 +691,7 @@ stackFence = (o, exprs, frameSize, isRoot) ->
   return
 
 Cast::transform = (r, o) ->
-  lty = @computedType
-  rty = @expr.unwrapAll().computedType
-  return unless lty instanceof PointerType and rty instanceof PointerType
-  normalizePtr @expr, lty.baseAlignment(), rty.baseAlignment()
+  return @computedType.coerce?(@expr)
 
 # Add SP computations and bring in heap views if needed.
 Code::transform = (o) ->
@@ -664,10 +705,7 @@ Code::transform = (o) ->
 # Add SP computation and pointer conversions to explicit returns.
 Return::transform = (o) ->
   # First transform for pointer conversion.
-  if (ty = o.returnType) and ty instanceof PointerType and expr = @expression
-    lalign = ty.baseAlignment();
-    ralign = expr.unwrapAll().computedType.baseAlignment();
-    @expression = normalizePtr @expression, lalign, ralign
+  @expression = ty.coerce?(@expression) if ty = o.returnType
   # Then transform for any stack fencing we need to do.
   return unless (frameSize = o.frameSize) and opts.unsafe
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
@@ -685,15 +723,12 @@ Call::transform = (o) ->
   paramTys = fty.params
   args = @args
   for pty, i in fty.params
-    if pty instanceof PointerType
-      lalign = pty.baseAlignment()
-      ralign = args[i].computedType.baseAlignment()
-      args[i] = normalizePtr args[i], lalign, ralign
+    args[i] = pty.coerce?(args[i])
   return
 
 # Transform stack allocated variables to dereference sp + offset.
 Literal::transform = (o) ->
-  return unless (ty = @computedType)
+  return unless ty = @computedType
   # This matters for TI: null will cause the typeset of pointers to be dimorphic.
   @value = '0' if @value is 'null' and ty instanceof PointerType
   return unless o.frameSize
@@ -746,18 +781,14 @@ Value::transform = (o) ->
 # i.e. it can't be compiled by transforming the lval and rval individually.
 Assign::transform = (o) ->
   return unless lty = @computedType
-  if lty instanceof PointerType
-    rty = @value.unwrapAll().computedType
-    if rty instanceof PointerType
-      lalign = lty.baseAlignment()
-      ralign = rty.baseAlignment()
-      @value = normalizePtr @value, lalign, ralign
-    else if rty in primTys and (au = alignmentUnits lty.base) isnt 1
-      @value = new Op('*', @value, new Value new Literal au)
-    return
   if lty instanceof StructType
     lval = @variable.unwrapAll()
-    inlineMemcpy o, (if lval.isDeref?() then lval.first else @variable), @value, lty
+    return inlineMemcpy o, (if lval.isDeref?() then lval.first else @variable), @value, lty
+  if lty instanceof PointerType and @context and (au = alignmentUnits lty.base) isnt 1
+    @value = new Op('*', @value, new Value new Literal au)
+  else if lty.coerce
+    @value = lty.coerce @value
+  return
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
@@ -798,45 +829,71 @@ Op::transform = (o) ->
       new Value new Parens new Block [new Assign(@first, size, op1),
                                       new Op(op2, @first, size)]
   else
+    # Don't return a new Op so we don't have to set transform to null to
+    # prevent unbounded recursion.
     ty1 = @first.computedType
     ty2 = @second.computedType
     if (op is '+' or op is '-') and
-       ((ty1 instanceof PointerType and ty2 in primTys and
+       ((ty1 instanceof PointerType and ty2 in integral and
          (au = alignmentUnits ty1.base) isnt 1) or
-        (ty2 instanceof PointerType and ty1 in primTys and
+        (ty2 instanceof PointerType and ty1 in integral and
          (au = alignmentUnits ty2.base) isnt 1))
       size = new Value new Literal au
       if ty1 instanceof PointerType
-        new Op op, @first, new Op('*', @second, size)
+        @second = new Op('*', @second, size)
       else
-        new Op op, new Op('*', @first, size), @second
+        @first = new Op('*', @first, size)
     else if op in COMPARE and
          ty1 instanceof PointerType and ty2 instanceof PointerType
-      lalign = ty1.baseAlignment()
-      ralign = ty2.baseAlignment()
       # By convention always normalize the second operand.
-      new Op op, @first, normalizePtr(@second, lalign, ralign)
+      @second = ty1.coerce @second
+    return
+
+# Coerce to an integral type.
+coerceIntegral = (width, signed) -> (expr) ->
+  ty = expr.unwrapAll().computedType
+  return expr unless ty isnt this
+  # Do we need to truncate? Bitwise operators automatically truncate to 32
+  # bits in JavaScript so if the width is 32, we don't need to do manual
+  # truncation.
+  if width isnt 32 and ty.size << 3 > width
+    c = new Op '&', expr, new Value new Literal '0x' + ((1 << width) - 1).toString(16)
+    # Do we need to sign extend?
+    if signed
+      shiftBy = new Value new Literal 32 - width
+      c = new Op '>>', new Op('<<', c, shiftBy), shiftBy
+    c
+  else if ty.signed isnt signed
+    new Op (if signed then '|' else '>>>'), expr, new Value new Literal '0'
+  else
+    expr
 
 # Primitive types as found in C.
 class PrimitiveType
-  constructor: (@size, @debugName, @view, @signed) ->
+  constructor: (@size, @debugName, @view, @signed, @coerce) ->
   lint: (types) -> this
   toString: -> @debugName
 
 # Cache this for typing null values.
 anyPtrTy = new PointerType null
-byteTy   = new PrimitiveType 1, 'byte',  U8,  no
-shortTy  = new PrimitiveType 2, 'short', I16, yes
-intTy    = new PrimitiveType 4, 'int',   I32, yes
-uintTy   = new PrimitiveType 4, 'uint',  U32, no
 
-# Sized primitive types.
-primTys  = [ byteTy, shortTy, intTy, uintTy ]
+# Builtin primitives.
+i8ty  = new PrimitiveType 1, 'i8',  I8,  yes, coerceIntegral(8,  yes)
+u8ty  = new PrimitiveType 1, 'u8',  U8,  no,  coerceIntegral(8,  no)
+i16ty = new PrimitiveType 2, 'i16', I16, yes, coerceIntegral(16, yes)
+u16ty = new PrimitiveType 2, 'u16', U16, no,  coerceIntegral(16, no)
+i32ty = new PrimitiveType 4, 'i32', I32, yes, coerceIntegral(32, yes)
+u32ty = new PrimitiveType 4, 'u32', U32, no,  coerceIntegral(32, no)
+f64ty = new PrimitiveType 8, 'double', F64, yes
+
+# Number type sets.
+integral = [ i8ty, u8ty, i16ty, u16ty, i32ty, u32ty ]
+numeric  = integral.concat [f64ty]
 
 # The local stack pointer is a u32.
-SP.computedType = uintTy
+SP.computedType = u32ty
 # The actual stack pointer is a u8.
-SPREAL.computedType = byteTy
+SPREAL.computedType = u8ty
 SPREAL.transform = null
 
 requireExpr = (name) ->
@@ -854,7 +911,24 @@ exports.analyzeTypes = (root, o) ->
   opts.warn   = o.warn
   opts.unsafe = o.unsafe
 
-  initialTypes = any: null, byte: byteTy, short: shortTy, int: intTy, uint: uintTy
+  initialTypes =
+    any:    null
+    # Integrals.
+    i8:     i8ty
+    u8:     u8ty
+    i16:    i16ty
+    u16:    u16ty
+    i32:    i32ty
+    u32:    u32ty
+    # Aliases.
+    byte:   u8ty
+    short:  i16ty
+    int:    i32ty
+    uint:   u32ty
+    # Floating point.
+    double: f64ty
+    num:    f64ty
+
   types = root.foldChildren initialTypes, 'collectType', null, immediate: true
   types[name] = ty.lint types for name, ty of types when ty
 
