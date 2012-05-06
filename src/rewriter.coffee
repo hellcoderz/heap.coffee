@@ -110,15 +110,16 @@ class exports.Rewriter
         # This code is an abomination but it's to get around ambiguity in the
         # grammar.
         end = i
-        hasComma = false
+        needsDeclStart = false
         while (tok = tokens[--i]?[0]) and
               (tok isnt 'TERMINATOR' and tok isnt 'INDENT')
-          if tok isnt 'IDENTIFIER' and tok isnt ','
+          # Don't add DECL_START for functions or struct fields.
+          if tok is 'PARAM_END' or
+             (tok is ']' and (ptok = tokens[i - 1]?[0]) and
+              (ptok is '+' or ptok is '-' or ptok is 'NUMBER'))
             return 1
-          hasComma ||= tok is ','
-        if hasComma
-          # Used to disambiguate , expressions and identifier lists in type
-          # declarations.
+          needsDeclStart ||= tok is ',' or tok is '}' or tok is ']'
+        if needsDeclStart
           tokens.splice i + 1, 0, @generate 'DECL_START', '', token[2]
       else if token[0] is 'IDENTIFIER' and token[1] is 'type' and
          tokens[i+1]?[0] is 'IDENTIFIER' and tokens[i+2]?[0] is '='

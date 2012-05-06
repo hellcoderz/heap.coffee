@@ -9,9 +9,9 @@
 # external typed stuff unsafe casts are required.
 
 {Scope} = require './scope'
-{Base, Parens, Block, Value, Literal, Op, Assign, Try, If, Switch,
- Code, Index, Access, Call, Return, Obj, While, Comment,
- TypeAssign, DeclareType, Cast,
+{Base, Parens, Block, Value, Literal, Op, Assign, Try, If, Switch, Param,
+ Code, Index, Access, Call, Return, Obj, While, Comment, Arr, Obj,
+ TypeAssign, DeclareType, Cast, TypeArr, TypeObj,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
 {flatten, extend, tystr} = require './helpers'
 
@@ -108,6 +108,15 @@ multExpr = (base, size) ->
   else
     new Op '*', base, new Value new Literal size
 
+# Ensure that a variable is fresh by transforming just-in-time.
+freshVariable = (name) ->
+  lit = new Literal
+  lit.transformNode = (o) ->
+    @value = o.scope.freeVariable name
+    delete this.transformNode
+    return
+  lit
+
 class Binding
   constructor: (@type) ->
 
@@ -186,6 +195,18 @@ PointerType::coerce = (expr) ->
   ty = expr.unwrapAll().computedType
   return expr unless ty instanceof PointerType and ty isnt this
   normalizePtr expr, this.baseAlignment(), ty.baseAlignment()
+
+TypeArr::lint = (types) ->
+  return this if @linted
+  @linted = true
+  @elements[i] = el.lint types for el, i in @elements
+  this
+
+TypeObj::lint = (types) ->
+  return this if @linted
+  @linted = true
+  field.type = field.type.lint types for field in @fields
+  this
 
 StructType::lint = (types) ->
   return this if @linted
@@ -377,21 +398,11 @@ Cast::computeType = (r, o) ->
   @typeCached = true
   @computedType = @type.lint o.types
 
-# Simple identifiers and integer literals may be typed.
-Literal::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  @computedType = if @value is 'null'
-    anyPtrTy
-  else if @isAssignable()
-    (@computedBinding = o.scope.binding @value)?.type
-  else if @isSimpleNumber()
-    i32ty
-  else if not isNaN Number @value
-    f64ty
-
 # Assignments do asymmetric type unification.
 Assign::computeType = (r, o) ->
+  if @context is 'object'
+    delete @variable.computedType
+    return
   return @computedType if @typeCached
   @typeCached = true
   return unless lty = @variable.unwrapAll().computedType
@@ -420,7 +431,20 @@ Assign::computeType = (r, o) ->
 Value::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  if baseTy = @base.unwrapAll().computedType
+  inner = @base.unwrapAll()
+  # Only literals that are values should get types. We don't want to transform
+  # properties. Simple identifiers and integer literals may be typed.
+  if inner instanceof Literal
+    val = inner.value
+    inner.computedType = if val is 'null'
+      anyPtrTy
+    else if inner.isAssignable()
+      (@computedBinding = o.scope.binding val)?.type
+    else if inner.isSimpleNumber()
+      i32ty
+    else if not isNaN number val
+      f64ty
+  if baseTy = inner.computedType
     for prop in @properties
       baseTy = baseTy.base if baseTy instanceof PointerType
       return unless baseTy instanceof StructType
@@ -518,8 +542,9 @@ Op::computeType = (r, o) ->
       ty1 = @first = @first.lint o.types
       error this, "cannot determine size of type `#{ty1}'" unless ty1.size
       i32ty
-    else if op is '&' and (ty1 = first.computedType)
-      error this, "taking reference of an untyped expression:\n#{@first}" unless ty1
+    else if op is '&'
+      ty1 = first.computedType
+      error this, "taking reference of an untyped expression `#{@first.compile o}'" unless ty1
       error this, "taking reference of a function type" if ty1 instanceof ArrowType
       error this, "taking reference of non-assignable" unless first.isAssignable()
       # Can't take references of upvars.
@@ -629,27 +654,69 @@ Code::primeComputeType = (r, o) ->
     if ptys.length isnt @params.length
       error this, "arrow type has different number of parameters than function"
     types = o.types
-    for { name }, i in @params
-      unless name instanceof Literal
-        error this, "cannot type complex parameter `#{name}'"
-      # Lint just in case the user manually declared the parameter types and
-      # thus the types were not linted before this point.
-      ptys[i] = ptys[i].lint types
-      (new DeclareType [new Value(name)], ptys[i]).declareType r, o
+    for param, i in @params
+      param.type = ptys[i]
+      param.declareType r, o
   # Hoist all the DeclareTypes to the top and process them. We shouldn't cross
   # scope here.
   @body.foldChildren null, 'declareType', null, types: o.types, scope: o.scope
   return
 
-# Declaring a type adds the type to the scope.
+# Declaring a type associates a type with the variable in the current
+# scope. Destructuring is allowed, but each destructured variable must get a
+# simple type, i.e. not a `TypeArr` or a `TypeObj`.
+declare = (scope, v, ty, node) ->
+  if v instanceof Literal
+    if ty instanceof TypeArr or ty instanceof TypeObj
+      error node, "cannot type non-destructuring variable with destructuring type `#{ty}'"
+    name = v.value
+    error node, "cannot redeclare typed variable `#{name}'" if scope.check name
+    bind = new Binding ty
+    scope.add name, bind
+    node.variables.push { name, type: ty, binding: bind }
+    putOnStack scope, name if ty instanceof StructType
+  if v instanceof Value
+    error node, "cannot type properties" if v.hasProperties()
+    v = v.base
+  if v instanceof Arr
+    els = v.objects
+    unless ty instanceof TypeArr
+      error node, "cannot type destructuring array with non-destructuring array type `#{ty}'"
+    for el, i in els
+      if el.this
+        error node, "cannot type @-names"
+      else
+        declare scope, el.base, ty.elements[i], node
+    return
+  if v instanceof Obj
+    objs = v.objects
+    unless ty instanceof TypeObj
+      error node, "cannot type destructuring object with non-destructuring object type `#{ty}'"
+    for obj in objs
+      if obj instanceof Assign
+        name = obj.variable.base
+        declare scope, obj.value, ty.names[name.value].type, node
+      else if obj.this
+        error node, "cannot type @-names"
+      else
+        name = obj.base
+        declare scope, name, ty.names[name.value].type, node
+    return
+
 DeclareType::declareType = (r, o) ->
   type  = @type.lint o.types
   scope = o.scope
-  for v in @variables
-    name = v.unwrapAll().value
-    error this, "cannot redeclare typed variable `#{name}'" if scope.check name
-    scope.add name, new Binding type
-    putOnStack scope, name if type instanceof StructType
+  @variables = []
+  declare scope, v, type, this for v in @typeables
+  return
+
+Param::declareType = (r, o) ->
+  # Lint just in case the user manually declared the parameter types and
+  # thus the types were not linted before this point.
+  type  = @type.lint o.types
+  scope = o.scope
+  @variables = []
+  declare scope, this.name, type, this
   return
 
 # Put a variable on the stack and increment the frame size.
@@ -676,18 +743,18 @@ inlineMemcpy = (o, dest, src, ty) ->
   scope = o.scope
   stmts = []
   # Store the pointer to the struct we're copying to.
-  destPtr = new Literal scope.freeVariable 'dest'
+  destPtr = freshVariable 'dest'
   destPtr.computedType = dest.computedType
   stmts.push new Assign new Value(destPtr), dest
   # Store the pointer to the struct we're copying from.
-  srcPtr = new Literal scope.freeVariable 'src'
+  srcPtr = freshVariable 'src'
   srcPtr.computedType = src.computedType
   stmts.push new Assign new Value(srcPtr), src
   # Unroll the copy loop over the bytes.
   if ty instanceof StructType
     # We can do better than byte-by-byte if we're memcpying a struct. We need
     # to manually set the computedType so they get transformed properly in
-    # Value::transform.
+    # `Value::transformNode`.
     for field in ty.fields
       access = new Access new Literal field.name
       access.computedField = field
@@ -709,7 +776,7 @@ inlineMemcpy = (o, dest, src, ty) ->
 
 # Reflect a heap-allocated struct as a JavaScript object literal.
 structLiteral = (v, ty, o) ->
-  ptr = new Literal o.scope.freeVariable 'ptr'
+  ptr = freshVariable 'ptr'
   propList = []
   for field in ty.fields
     fname = field.name
@@ -720,7 +787,7 @@ structLiteral = (v, ty, o) ->
     access.computedField = field
     propValue = new Value ptr, [access]
     propValue.computedType = field.type
-    propList.push new Assign new Value(new Literal fname), propValue.transform(), 'object'
+    propList.push new Assign new Value(new Literal fname), propValue.transformNode(), 'object'
   obj = new Value new Obj propList
   new Value new Parens new Block [new Assign(new Value(ptr), v), obj]
 
@@ -747,34 +814,54 @@ stackFence = (o, exprs, frameSize, spOffsets, isRoot) ->
   return
 
 # Coerce to a type.
-Cast::transform = (r, o) ->
+Cast::transformNode = (o) ->
   return @computedType.coerce?(@expr)
 
 # Add SP computations and bring in heap views if needed.
-Code::transform = (o) ->
+Code::transformNode = (o) ->
   o.returnType = @computedType?.ret
   if frameSize = @frameSize
+    # All parameters that need to be stack allocated need to not be emitted as
+    # stack dereferences in the parameter list and we have to copy over the
+    # argument.
+    exprs = @body.expressions
+    for param in @params
+      for arg in param.variables
+        if arg.binding.onStack
+          arg.save = freshVariable arg.name
+          plh = new Value new Literal arg.name
+          prh = new Value arg.save
+          assign = new Assign plh, prh
+          assign.computedType = plh.computedType = prh.computedType = arg.type
+          plh.computedBinding = arg.binding
+          exprs.unshift assign
     o.frameSize = frameSize
-    stackFence o, @body.expressions, frameSize, @spOffsets
+    stackFence o, exprs, frameSize, @spOffsets
+    for param in @params
+      for { name, save } in param.variables
+        exprs.unshift new Assign new Value(save), new Value new Literal name
   return
 
 # Add SP computation and pointer conversions to explicit returns.
-Return::transform = (o) ->
+Return::transformNode = (o) ->
   # First transform for pointer conversion.
   @expression = ty.coerce?(@expression) if ty = o.returnType
   # Then transform for any stack fencing we need to do.
   return unless (frameSize = o.frameSize) and opts.unsafe
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
   if expr = @expression
-    tmp = new Value new Literal o.scope.freeVariable 't'
-    body = [new Assign(tmp, expr), restoreStack, tmp]
+    body = new Block
+    body.transformNode = (o) ->
+      tmp = new Value freshVariable 't'
+      @expressions = [new Assign(tmp, expr), restoreStack, tmp]
+      return
   else
-    body = [restoreStack, undefExpr]
-  @expression = new Value new Parens new Block body
+    body = new Block [restoreStack, new Return]
+  @expression = new Value new Parens body
   return
 
 # Need to convert pointers when passing them as arguments.
-Call::transform = (o) ->
+Call::transformNode = (o) ->
   return unless fty = @variable?.unwrapAll().computedType
   paramTys = fty.params
   args = @args
@@ -782,33 +869,32 @@ Call::transform = (o) ->
     args[i] = pty.coerce?(args[i])
   return
 
-# Transform stack allocated variables to dereference sp + offset.
-Literal::transform = (o) ->
-  return unless ty = @computedType
-  # This matters for TI: null will cause the typeset of pointers to be
-  # dimorphic.
-  @value = '0' if @value is 'null' and ty instanceof PointerType
-  # Treat stack accesses as dereferences, except for structs, which are kept
-  # as offsets. FIXME: it's unclear what raw use of a stack-allocated struct
-  # means right now.
-  if @computedBinding?.onStack and ty not instanceof StructType and not @noStackDeref
-    new Value U32(o), [new Index new Value new Literal @value]
-
 # Transform this Value into a new Value that does offset index lookups on
 # the heap.
-Value::transform = (o) ->
-  return unless @computedType
-  props = @properties
-  # Non-access values get transformed at the inner level.
-  return unless props.length
+Value::transformNode = (o) ->
+  return unless ty = @computedType
   base  = @base
   inner = base.unwrapAll()
+  props = @properties
+  unless props.length
+    if inner instanceof Literal
+      if @computedBinding?.onStack and
+         ty not instanceof StructType and not inner.noStackDeref
+        # Treat stack accesses as dereferences, except for structs, which are
+        # kept as offsets. FIXME: it's unclear what raw use of a
+        # stack-allocated struct means right now.
+        return new Value U32(o), [new Index new Value new Literal inner.value]
+      if inner.value is 'null' and ty instanceof PointerType
+        # This matters for TI: null will cause the typeset of pointers to be
+        # dimorphic.
+        inner.value = '0'
+    return
   # If we're explicitly dereferencing the struct base, treat it like we
   # weren't.
   v = if inner.isDeref?() then inner.first else base
   vty = v.unwrapAll().computedType
   cumulativeOffset = 0
-  for prop in @properties
+  for prop in props
     field = prop.computedField
     if (fty = field.type) instanceof StructType
       cumulativeOffset += field.offset
@@ -817,15 +903,13 @@ Value::transform = (o) ->
       vty = fty
       cumulativeOffset = 0
   if fty instanceof StructType and cumulativeOffset isnt 0
-    # This is not a pointer, but transform a pointer anyways so memcpy can
-    # work. Typechecking ensures that this isn't used like a pointer.
     new Op '+', v, new Value new Literal cumulativeOffset
   else
     v
 
 # Do struct copy semantics here since it requires a non-local transformation,
 # i.e. it can't be compiled by transforming the lval and rval individually.
-Assign::transform = (o) ->
+Assign::transformNode = (o) ->
   return unless lty = @computedType
   if lty instanceof StructType
     lval = @variable.unwrapAll()
@@ -838,7 +922,7 @@ Assign::transform = (o) ->
 
 # Typed new and delete are transformed to malloc and free, and pointer
 # arithmetic also needs to be transformed.
-Op::transform = (o) ->
+Op::transformNode = (o) ->
   return unless @computedType or @first.computedType
   op = @operator
   if @isUnary()
@@ -939,7 +1023,7 @@ numeric  = integral.concat [f64ty]
 SP.computedType = u32ty
 # The actual stack pointer is a u8.
 SPREAL.computedType = u8ty
-SPREAL.transform = null
+SPREAL.transformNode = null
 
 requireExpr = (name) ->
   new Call new Value(new Literal 'require'), [new Value new Literal "'#{name}'"]
@@ -947,7 +1031,10 @@ requireExpr = (name) ->
 exports.analyzeTypes = (root, o) ->
   usesTypes = no
   root.traverseChildren yes, (node) ->
-    if node instanceof DeclareType
+    if (node instanceof DeclareType) or
+       (node instanceof Op and node.isUnary() and
+        (node.operator is '&' or node.operator is '*')) or
+       (node instanceof Code and node.paramTypes)
       usesTypes = yes
       return no
   return unless usesTypes

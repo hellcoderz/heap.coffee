@@ -37,7 +37,7 @@ o = (patternString, action, options) ->
   action = action.replace /\binstanceof /g, '$&yy.'
   action = action.replace /\bnew /g, '$&yy.'
   action = action.replace /\b(?:Block\.wrap|extend)\b/g, 'yy.$&'
-  [patternString, "$$ = #{action}; $$.lineno = yylineno;", options]
+  [patternString, "$$ = #{action}; $$.lineno = yylineno + 1;", options]
 
 # Grammatical Rules
 # -----------------
@@ -175,12 +175,10 @@ grammar =
     o 'Comment'
   ]
 
-  TypeList: [
-    o '',                                                   -> []
-    o 'Type',                                               -> [$1]
-    o 'TypeList , Type',                                    -> $1.concat $3
-    o 'TypeList OptComma TERMINATOR Type',                  -> $1.concat $4
-    o 'TypeList OptComma INDENT TypeList OptComma OUTDENT', -> $1.concat $4
+  ParamTypeList: [
+    o '',                                       -> []
+    o 'Type',                                   -> [$1]
+    o 'ParamTypeList , Type',                   -> $1.concat $3
   ]
 
   # Pointer types have to be on named types. This is to make it clearer that
@@ -188,22 +186,64 @@ grammar =
   Type: [
     o 'IDENTIFIER',                                     -> new TypeName $1
     o '* IDENTIFIER',                                   -> new PointerType new TypeName $2
-    o 'PARAM_START TypeList PARAM_END ->
+    o 'PARAM_START ParamTypeList PARAM_END ->
        INDENT Type OUTDENT',                            -> new ArrowType $2, $6
     o 'STRUCT { StructFieldList OptComma }',            -> new StructType $3
     o 'STRUCT INDENT StructFieldList OptComma OUTDENT', -> new StructType $3
+    o 'TypeArray'
+    o 'TypeObject'
   ]
 
-  IdentifierList: [
-    o 'Identifier',                             -> [$1]
-    o 'IdentifierList , Identifier',            -> $1.concat $3
+  TypeList: [
+    o 'Type',                                               -> [$1]
+    o 'TypeList , Type',                                    -> $1.concat $3
+    o 'TypeList OptComma TERMINATOR Type',                  -> $1.concat $4
+    o 'INDENT TypeList OptComma OUTDENT',                   -> $2
+    o 'TypeList OptComma INDENT TypeList OptComma OUTDENT', -> $1.concat $4
+  ]
+
+  # Type for destructuring arrays.
+  TypeArray: [
+    o '[ TypeList OptComma ]',                  -> new TypeArr $2
+  ]
+
+  # Type for destructuring objects.
+  TypeObject: [
+    o '{ AssignTypeList OptComma }',            -> new TypeObj $2
+  ]
+
+  AssignTypeList: [
+    o 'AssignTypeObj',                                    -> [$1]
+    o 'AssignTypeList , AssignTypeObj',                   -> $1.concat $3
+    o 'AssignTypeList OptComma TERMINATOR AssignTypeObj', -> $1.concat $4
+    o 'AssignTypeList OptComma INDENT
+       AssignTypeList OptComma OUTDENT',                  -> $1.concat $4
+  ]
+
+  AssignTypeObj: [
+    o 'IDENTIFIER : Type',                      -> new TypeObjField $1, $3, 'object'
+    o 'IDENTIFIER : INDENT Type OUTDENT',       -> new TypeObjField $1, $3, 'object'
+    o 'Comment'
+  ]
+
+  TypeableList: [
+    o 'Typeable',                               -> [$1]
+    o 'TypeableList , Typeable',                -> $1.concat $3
+  ]
+
+  # Only simple identifiers and destructuring arrays and objects are
+  # typeable.
+  Typeable: [
+    o 'Identifier'
+    o 'Array'
+    o 'Object'
   ]
 
   DeclareType: [
     o 'Identifier IS_TYPE Type',                -> new DeclareType [$1], $3
     o 'Identifier IS_TYPE INDENT Type OUTDENT', -> new DeclareType [$1], $4
-    o 'DECL_START IdentifierList IS_TYPE Type', -> new DeclareType $2, $4
-    o 'DECL_START IdentifierList
+    o 'DECL_START TypeableList IS_TYPE Type',   -> new DeclareType $2, $4
+    o 'DECL_START TypeableList
        IS_TYPE INDENT Type OUTDENT',            -> new DeclareType $2, $5
   ]
 
@@ -217,10 +257,6 @@ grammar =
     o 'Assignable = Expression',                 -> new Assign $1, $3
     o 'Assignable = TERMINATOR Expression',      -> new Assign $1, $4
     o 'Assignable = INDENT Expression OUTDENT',  -> new Assign $1, $4
-  ]
-
-  AssignGlyph: [
-    o '='
   ]
 
   # Assignment when it happens within an object literal. The difference from
@@ -254,10 +290,9 @@ grammar =
   # of **Block** preceded by a function arrow, with an optional parameter
   # list.
   Code: [
-    o 'PARAM_START ParamList PARAM_END IS_TYPE PARAM_START TypeList PARAM_END FuncGlyph Block', ->
-      c = new Code $2, $9, $8
-      c.paramTypes = $6
-      c
+    o 'PARAM_START ParamList PARAM_END IS_TYPE
+       PARAM_START ParamTypeList PARAM_END FuncGlyph Block', ->
+      c = new Code $2, $9, $8; c.paramTypes = $6; c
     o 'PARAM_START ParamList PARAM_END FuncGlyph Block', -> new Code $2, $5, $4
     o 'FuncGlyph Block',                        -> new Code [], $2, $1
   ]
@@ -290,7 +325,7 @@ grammar =
     o 'ParamVar = Expression',                  -> new Param $1, $3
   ]
 
- # Function Parameters
+  # Function Parameters
   ParamVar: [
     o 'Identifier'
     o 'ThisProperty'

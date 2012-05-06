@@ -37,15 +37,30 @@ exports.Base = class Base
   # already been asked to return the result (because statements know how to
   # return results).
   compile: (o, lvl) ->
-    return trans.compile o, lvl if trans = @transform?(o)
     o        = extend {}, o
     o.level  = lvl if lvl
     node     = @unfoldSoak(o) or this
     node.tab = o.indent
     if o.level is LEVEL_TOP or not node.isStatement(o)
-      node.compileNode o
+      node.transform(o).compileNode o
     else
       node.compileClosure o
+
+  transform: (o) ->
+    # Before we compile, do we need to transform any of its children?
+    for attr in @children when child = @[attr]
+      if child instanceof Array and child.length
+        @transformArray child, o
+      else if trans = child.transformNode?(o)
+        @[attr] = trans
+    this
+
+  transformArray: (arr, o) ->
+    for el, i in arr
+      if el instanceof Array
+        @transformArray el, o
+      else if trans = el.transformNode?(o)
+        arr[i] = trans
 
   # Statements converted into expressions via closure-wrapping share a scope
   # object with their parent closure, to preserve the expected lexical scope.
@@ -53,7 +68,7 @@ exports.Base = class Base
     if @jumps()
       throw SyntaxError 'cannot use a pure statement in an expression.'
     o.sharedScope = yes
-    Closure.wrap(this).compileNode o
+    Closure.wrap(this).transform(o).compileNode o
 
   # If the code generation wishes to use the result of a complex expression
   # in multiple places, ensure that the expression is only ever evaluated once,
@@ -224,7 +239,7 @@ exports.Block = class Block extends Base
         # This is a nested block.  We don't do anything special here like enclose
         # it in a new scope; we just compile the statements in this block along with
         # our own
-        codes.push node.compileNode o
+        codes.push node.transform(o).compileNode o
       else if top
         node.front = true
         code = node.compile o
@@ -259,7 +274,7 @@ exports.Block = class Block extends Base
         exp
       rest = @expressions[preludeExps.length...]
       @expressions = preludeExps
-      prelude = "#{@compileNode merge(o, indent: '')}\n" if preludeExps.length
+      prelude = "#{@transform(o).compileNode merge(o, indent: '')}\n" if preludeExps.length
       @expressions = rest
     code = @compileWithDeclarations o
     return code if o.bare
@@ -276,9 +291,9 @@ exports.Block = class Block extends Base
     if i
       rest = @expressions.splice i, 9e9
       [spaced, @spaced] = [@spaced, no]
-      [code  , @spaced] = [(@compileNode o), spaced]
+      [code  , @spaced] = [(@transform(o).compileNode o), spaced]
       @expressions = rest
-    post = @compileNode o
+    post = @transform(o).compileNode o
     {scope} = o
     if scope.expressions is this
       declars = o.scope.hasDeclarations()
@@ -359,6 +374,34 @@ exports.PointerType = class PointerType extends Base
     else
       '*' + tystr(@base, lvl + 1)
 
+exports.TypeArr = class TypeArr extends Base
+  constructor: (@elements) ->
+
+  toString: (lvl = 0) ->
+    if lvl > 0 and @debugName
+      @debugName
+    else
+      "[#{(tystr(e, lvl + 1) for e in @elements).join(', ')}]"
+
+exports.TypeObj = class TypeObj extends Base
+  constructor: (fields) ->
+    @fields = fields
+    @names = names = {}
+    for field, i in fields
+      names[field.name] = field
+
+  toString: (lvl = 0) ->
+    if lvl > 0 and @debugName
+      @debugName
+    else
+      "{#{@fields.join(', ')}}"
+
+exports.TypeObjField = class ObjField extends Base
+  constructor: (@name, @type) ->
+
+  toString: (lvl = 0) ->
+    "#{@name}: #{tystr(@type, lvl + 1)}"
+
 exports.ArrowType = class ArrowType extends Base
   constructor: (@params, @ret) ->
 
@@ -404,9 +447,9 @@ exports.TypeAssign = class TypeAssign extends Base
     '\n' + idt + @constructor.name + ' ' + @name + '\n' + idt + TAB + @type
 
 exports.DeclareType = class DeclareType extends Base
-  constructor: (@variables, @type) ->
+  constructor: (@typeables, @type) ->
 
-  children: ['variables']
+  children: ['typeables']
   isStatement: YES
 
   compile: (o, level) ->
@@ -414,17 +457,17 @@ exports.DeclareType = class DeclareType extends Base
     # an upvar is not allowed. We would really like to do this check during
     # typechecking, but the logic for destructuring is too complicated to
     # warrant duplicating in the typechecking phase.
+    code  = ""
     scope = o.scope
-    names = for v in @variables
-      name = v.unwrapAll().value
+    for { name, type: ty } in @variables
       if scope.parent?.check name
         throw TypeError "type for `#{name}' not declared in the same scope"
       scope.find name
-      name
-    "#{o.indent}// #{names.join(', ')} :: #{@type}"
+      code += "#{o.indent}// #{name} :: #{ty}\n"
+    code
 
   toString: (idt = '') ->
-    '\n' + idt + @constructor.name + @variables + '\n' + idt + TAB + @type
+    '\n' + idt + @constructor.name + @typeables + '\n' + idt + TAB + @type
 
 exports.Cast = class Cast extends Base
   constructor: (@expr, @type) ->
@@ -830,7 +873,7 @@ exports.Range = class Range extends Base
     pre    = "\n#{idt}#{result} = [];"
     if @fromNum and @toNum
       o.index = i
-      body    = @compileNode o
+      body    = @transform(o).compileNode o
     else
       vars    = "#{i} = #{@fromC}" + if @toC isnt @toVar then ", #{@toC}" else ''
       cond    = "#{@fromVar} <= #{@toVar}"
