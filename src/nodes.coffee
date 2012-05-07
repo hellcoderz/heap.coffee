@@ -441,7 +441,7 @@ exports.TypeAssign = class TypeAssign extends Base
   isStatement: YES
 
   compile: (o, level) ->
-    "#{o.indent}// type #{@name} = #{@type}"
+    "#{o.indent}// type #{@name} = #{tystr(@type)}"
 
   toString: (idt = '') ->
     '\n' + idt + @constructor.name + ' ' + @name + '\n' + idt + TAB + @type
@@ -457,13 +457,14 @@ exports.DeclareType = class DeclareType extends Base
     # an upvar is not allowed. We would really like to do this check during
     # typechecking, but the logic for destructuring is too complicated to
     # warrant duplicating in the typechecking phase.
-    code  = ""
     scope = o.scope
-    for { name, type: ty } in @variables
+    code = ""
+    for { name, type: ty }, i in @variables
       if scope.parent?.check name
         throw TypeError "type for `#{name}' not declared in the same scope"
       scope.find name
-      code += "#{o.indent}// #{name} :: #{ty}\n"
+      code += '\n' if i isnt 0
+      code += "#{o.indent}// #{name} :: #{tystr(ty)}"
     code
 
   toString: (idt = '') ->

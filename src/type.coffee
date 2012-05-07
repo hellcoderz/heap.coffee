@@ -1,12 +1,7 @@
 # `type.coffee` contains all the code having to do with analyzing types for
-# generating code with a manual heap.
-#
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-# !! THIS IS NOT A GOOD TYPE SYSTEM !!
-# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-#
-# Only local variables may be typed and types are file-local. To import
-# external typed stuff unsafe casts are required.
+# generating code with a manual heap. Only local variables may be typed and
+# types are file-local. To import external typed stuff unsafe casts are
+# required.
 
 {Scope} = require './scope'
 {Base, Parens, Block, Value, Literal, Op, Assign, Try, If, Switch, Param,
@@ -20,6 +15,8 @@ error = (node, msg) ->
   err = new TypeError msg
   err.lineno = node.lineno
   throw err
+
+#### Constants and Utilities
 
 # The heap module that holds all the views.
 HEAP    = new Value new Literal '_HEAP'
@@ -57,7 +54,8 @@ U32 = recorderForView U32V
 F32 = recorderForView F32V
 F64 = recorderForView F64V
 
-# Used to compute shifts.
+# Since all typed array views are aligned, we record the various views' sizes
+# here for use in computing shifts.
 I8.BYTES_PER_ELEMENT  = U8.BYTES_PER_ELEMENT  = 1
 I16.BYTES_PER_ELEMENT = U16.BYTES_PER_ELEMENT = 2
 I32.BYTES_PER_ELEMENT = U32.BYTES_PER_ELEMENT = 4
@@ -68,6 +66,7 @@ F64.BYTES_PER_ELEMENT = 8
 opts = { warn: false, unsafe: false }
 printWarn = (line) -> process.stderr.write 'warning: ' + line + '\n' if opts.warn
 
+# Convert a pointer aligned according to `lalign` to one aligned to `ralign`.
 normalizePtr = (ptr, lalign, ralign) ->
   # We're done if they're the same size or if the ptr is 0 or null.
   if lalign is ralign or
@@ -86,6 +85,8 @@ normalizePtr = (ptr, lalign, ralign) ->
   #   error this, "ratio between primitive type sizes must be a power of 2"
   new Parens new Op op, ptr, new Value new Literal (Math.log(ratio) / Math.log(2))
 
+# Generate an offset expression from `base`. The `base` is normalized
+# according to the type of data (and the view needed) found at `offset`.
 offsetExpr = (base, baseTy, offset, offsetTy) ->
   balign = baseTy.view.BYTES_PER_ELEMENT
   oalign = offsetTy.view.BYTES_PER_ELEMENT
@@ -96,7 +97,7 @@ offsetExpr = (base, baseTy, offset, offsetTy) ->
   else
     normalized
 
-# Calls offsetExpr with a size of 1, so that shiftBy is 0 and we don't shift.
+# Calls `offsetExpr` with the stack pointer.
 stackOffsetExpr = (offset, offsetTy) ->
   offsetExpr SP, SP.computedType, offset, offsetTy
 
@@ -117,10 +118,11 @@ freshVariable = (name) ->
     return
   lit
 
+# A box used to record a local variable's type and other metadata.
 class Binding
   constructor: (@type) ->
 
-# This is like @type, but it also looks up the scope chain.
+# This is like *Scope::type*, but it also looks up the scope chain.
 Scope::binding = (name, immediate) ->
   found = @type name
   return found if found or immediate
@@ -154,6 +156,8 @@ TypeAssign::collectType = (types) ->
   types[@name] = @type
   types
 
+#### Type Linting
+
 # Align an offset according to its size.
 alignOffset = (offset, ty) ->
   size = ty.view.BYTES_PER_ELEMENT
@@ -165,11 +169,10 @@ alignmentUnits = (ty) -> ty.size / ty.view.BYTES_PER_ELEMENT
 # Sanity check the type and compute the size. Expects synonyms to already have
 # been computed.
 #
-# To keep things simple, we have the following restrictions:
+# We have the following restrictions:
 #
 #  - struct types are nominal
-#  - pointers can only be taken on type names
-#  - no subpart of a function type may be a function type
+#  - pointers can only be taken on sized types
 TypeName::lint = (types) ->
   error this, "circular type synonym: #{@name}" if @linting
   return @linted if @linted
@@ -221,32 +224,32 @@ StructType::lint = (types) ->
   # The size of the struct is the its maximum offset + the size of the largest
   # field with that offset.
   size = 0
-  # Start off with the smallest view, U8.
+  # Start off with the smallest view, `U8`.
   maxView = U8
   # An undefined offset tells the typechecker to fill it in from the
   # previous field. For example,
   #
-  #   struct { [4] i :: int, j :: int }
+  #     struct { [4] i :: int, j :: int }
   #
   # is the same as
   #
-  #   struct { [4] i :: int, [8] j :: int }
+  #     struct { [4] i :: int, [8] j :: int }
   #
   # The first field's offset is 0 if undefined.
   #
   # The special form [-] means to use the same offset as the previous
   # field. For example,
   #
-  #   struct { i :: int, [-] j :: int }
+  #     struct { i :: int, [-] j :: int }
   #
   # is the same as
   #
-  #   struct { [0] i :: int, [0] j ::
+  #     struct { [0] i :: int, [0] j ::
   #
   # Since there is an imaginary first field with an offset of 0, you can use
-  # [-] on the first field too to make everything line up.
+  # `[-]` on the first field too to make everything line up.
   #
-  # The special form [+] means add the size of the previous field to the
+  # The special form `[+]` means add the size of the previous field to the
   # previous field's offset for the current offset. This is the default
   # behavior when no offset attribute exists.
   #
@@ -272,11 +275,13 @@ StructType::lint = (types) ->
       field.offset = alignOffset prev.offset + prev.type.size, ty
     size = s if (s = field.offset + ty.size) > size
     prev = field
-  # Pointers of incompatible types cannot be at the same offset due to alignment.
+  # Pointers of incompatible types cannot be at the same offset due to
+  # alignment.
   for field in fields when (ty = field.type) instanceof PointerType
     for field2 in fields when field2.offset is field.offset and
                               (ty2 = field2.type) instanceof PointerType
-      # Print warnings about unioning incompatible pointer types, which is unsafe.
+      # Print warnings about unioning incompatible pointer types, which is
+      # unsafe.
       unify types, ty, ty2, true and unify types, ty2, ty, true
   # Pad the size to a multiple of the alignment.
   align = maxView.BYTES_PER_ELEMENT
@@ -294,15 +299,17 @@ ArrowType::lint = (types) ->
     params[i] = ty.lint types
   this
 
-# Unify two types, if possible, into a single type. If assign is true, then
+#### Type Checking
+
+# Unify two types, if possible, into a single type. If `assign` is true, then
 # this behaves asymmetrically for pointer types and automatic promotions of
 # primitive types.
 unify = (types, lty, rty, assign) ->
-  # Compatibility is reflexive.
+  # Unify is reflexive.
   return lty if lty is rty
   # If the left side is dynamic, the entire expression is dynamic.
   return unless lty and rty
-  # Two pointer types are compatible iff their bases are size compatible.
+  # Two pointer types are unifiable iff their bases are size compatible.
   if lty instanceof PointerType and rty instanceof PointerType
     if assign
       # Assigning a narrower pointer to a wider one may mess up due to
@@ -313,8 +320,7 @@ unify = (types, lty, rty, assign) ->
     else
       # If we're not assigning, the base types have to be exactly the same.
       return lty if lty.base is rty.base
-  # Two function types are compatible if their parameters and return types are
-  # compatible.
+  # Two function types are unifiable if they are point-wise unifiable.
   if lty instanceof ArrowType and rty instanceof ArrowType
     lptys = lty.params
     rptys = rty.params
@@ -342,7 +348,7 @@ unify = (types, lty, rty, assign) ->
       return lty
   null
 
-# Is this Op a dereference?
+# Is this **Op** a dereference?
 Op::isAssignable = Op::isDeref = -> not @second and @operator is '*'
 
 # A block gets the type of its tail expression.
@@ -426,7 +432,7 @@ Assign::computeType = (r, o) ->
       error @variable, msg
 
 # Accesses on struct types may be typed. If we arrived at this case it's
-# because unwrapAll() didn't manage to unwrap value, i.e. this is a properties
+# because `unwrapAll()` didn't manage to unwrap value, i.e. this is a properties
 # access.
 Value::computeType = (r, o) ->
   return @computedType if @typeCached
@@ -615,13 +621,13 @@ newTypedScope = (p, e, m) ->
 # This is not a full-fledged type system, so this behavior is just to provide
 # a convenience. The following
 #
-#   f :: (int) -> int
-#   f =  (x) -> x
+#     f :: (int) -> int
+#     f =  (x) -> x
 #
 # is equivalent to
 #
-#   f :: (int) -> int
-#   f =  (x) :: (int) -> x
+#     f :: (int) -> int
+#     f =  (x) :: (int) -> x
 #
 # _only_ when the binding for f is a _syntactic_ function. If not, you would
 # have to declare the types of arguments manually.
@@ -640,7 +646,7 @@ Assign::primeComputeType = (r, o) ->
 # if the return type is an arrow type.
 Code::primeComputeType = (r, o) ->
   # If the declared return type is an arrow type, recur on all return
-  # positions and propagate like we do in Assign::primeComputeType.
+  # positions and propagate.
   rty = @returnType
   if rty instanceof ArrowType
     for rexpr in returnExpressions @body when rexpr instanceof Code
@@ -657,14 +663,14 @@ Code::primeComputeType = (r, o) ->
     for param, i in @params
       param.type = ptys[i]
       param.declareType r, o
-  # Hoist all the DeclareTypes to the top and process them. We shouldn't cross
+  # Hoist all the **DeclareType**s to the top and process them. We shouldn't cross
   # scope here.
   @body.foldChildren null, 'declareType', null, types: o.types, scope: o.scope
   return
 
 # Declaring a type associates a type with the variable in the current
 # scope. Destructuring is allowed, but each destructured variable must get a
-# simple type, i.e. not a `TypeArr` or a `TypeObj`.
+# simple type, i.e. not a **TypeArr** or a **TypeObj**.
 declare = (scope, v, ty, node) ->
   if v instanceof Literal
     if ty instanceof TypeArr or ty instanceof TypeObj
@@ -675,6 +681,7 @@ declare = (scope, v, ty, node) ->
     scope.add name, bind
     node.variables.push { name, type: ty, binding: bind }
     putOnStack scope, name if ty instanceof StructType
+    return
   if v instanceof Value
     error node, "cannot type properties" if v.hasProperties()
     v = v.base
@@ -695,13 +702,14 @@ declare = (scope, v, ty, node) ->
     for obj in objs
       if obj instanceof Assign
         name = obj.variable.base
-        declare scope, obj.value, ty.names[name.value].type, node
+        declare scope, name, ty.names[name.value].type, node
       else if obj.this
         error node, "cannot type @-names"
       else
         name = obj.base
         declare scope, name, ty.names[name.value].type, node
     return
+  error node, "trying to type non-typeable"
 
 DeclareType::declareType = (r, o) ->
   type  = @type.lint o.types
@@ -718,6 +726,8 @@ Param::declareType = (r, o) ->
   @variables = []
   declare scope, this.name, type, this
   return
+
+#### AST Transformation
 
 # Put a variable on the stack and increment the frame size.
 putOnStack = (scope, name) ->
@@ -793,11 +803,11 @@ structLiteral = (v, ty, o) ->
 
 # Transform a function to have the right stack pointer computations upon entry
 # and exit. The safe way is to wrap the entire body of the function in a
-# try..finally block to account for possible throws. If the user indicated
-# gotta-go-fast, we'll only emit stack pointer computations for explicit
+# `try..finally` block to account for possible throws. If the user indicated
+# `gotta-go-fast`, we'll only emit stack pointer computations for explicit
 # returns.
 stackFence = (o, exprs, frameSize, spOffsets, isRoot) ->
-  # The stack uses U32, so record it manually.
+  # The stack uses `U32`, so record it manually.
   U32(o)
   # Assign all the on-stack locals to their addresses.
   scope = o.scope
@@ -817,7 +827,7 @@ stackFence = (o, exprs, frameSize, spOffsets, isRoot) ->
 Cast::transformNode = (o) ->
   return @computedType.coerce?(@expr)
 
-# Add SP computations and bring in heap views if needed.
+# Add `SP` computations and bring in heap views if needed.
 Code::transformNode = (o) ->
   o.returnType = @computedType?.ret
   if frameSize = @frameSize
@@ -947,7 +957,7 @@ Op::transformNode = (o) ->
     else if (op is '++' or op is '--') and
             (ty1 = @computedType) instanceof PointerType and
             (au = alignmentUnits ty1.base) isnt 1
-      # If p :: *T, p++ desugars to (p += sizeof T, p - sizeof T).
+      # If `p` is type `*T`, p++` desugars to `(p += sizeof T, p - sizeof T)`.
       size = new Value new Literal au
       if op is '++'
         op1 = '+='
@@ -997,6 +1007,8 @@ coerceIntegral = (width, signed) -> (expr) ->
   else
     expr
 
+#### Driver
+
 # Primitive types as found in C.
 class PrimitiveType
   constructor: (@size, @debugName, @view, @signed, @coerce) ->
@@ -1017,11 +1029,11 @@ f64ty = new PrimitiveType 8, 'double', F64, yes
 
 # Number type sets.
 integral = [ i8ty, u8ty, i16ty, u16ty, i32ty, u32ty ]
-numeric  = integral.concat [f64ty]
+numeric  = integral.concat [ f64ty ]
 
-# The local stack pointer is a u32.
+# The local stack pointer is a `u32`.
 SP.computedType = u32ty
-# The actual stack pointer is a u8.
+# The actual stack pointer is a `u8`.
 SPREAL.computedType = u8ty
 SPREAL.transformNode = null
 
@@ -1072,7 +1084,7 @@ exports.analyzeTypes = (root, o) ->
   root.spOffsets = spOffsets scope
   root.frameSize = scope.frameSize
   root.transformRoot = (o) ->
-    # Require the heap. This has to be done using o.scope.assign to make sure
+    # Require the heap. This has to be done using `o.scope.assign`, to make sure
     # that it comes before the cached views.
     o.scope.assign HEAP.base.value, "require('heap/heap')"
     # Do the stack fence for the module.
@@ -1080,7 +1092,7 @@ exports.analyzeTypes = (root, o) ->
     if frameSize = @frameSize
       o.frameSize = frameSize
       stackFence o, exprs, frameSize, @spOffsets, yes
-    # Bring in malloc if this module needs it.
+    # Bring in `malloc` if this module needs it.
     if scope.needsMalloc
       obj = new Value new Obj [MALLOC, FREE]
       exprs.unshift new Assign obj, requireExpr 'heap/malloc'
