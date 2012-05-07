@@ -673,10 +673,11 @@ Code::primeComputeType = (r, o) ->
 # simple type, i.e. not a **TypeArr** or a **TypeObj**.
 declare = (scope, v, ty, node) ->
   if v instanceof Literal
-    if ty instanceof TypeArr or ty instanceof TypeObj
-      error node, "cannot type non-destructuring variable with destructuring type `#{ty}'"
     name = v.value
     error node, "cannot redeclare typed variable `#{name}'" if scope.check name
+    return unless ty
+    if ty instanceof TypeArr or ty instanceof TypeObj
+      error node, "cannot type non-destructuring variable with destructuring type `#{ty}'"
     bind = new Binding ty
     scope.add name, bind
     node.variables.push { name, type: ty, binding: bind }
@@ -702,12 +703,12 @@ declare = (scope, v, ty, node) ->
     for obj in objs
       if obj instanceof Assign
         name = obj.variable.base
-        declare scope, name, ty.names[name.value].type, node
+        declare scope, name, ty.names[name.value]?.type, node
       else if obj.this
         error node, "cannot type @-names"
       else
         name = obj.base
-        declare scope, name, ty.names[name.value].type, node
+        declare scope, name, ty.names[name.value]?.type, node
     return
   error node, "trying to type non-typeable"
 
