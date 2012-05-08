@@ -774,13 +774,10 @@ inlineMemcpy = (o, dest, src, ty) ->
     for field in ty.fields
       access = new Access new Literal field.name
       access.computedField = field
-      fty = field.type
       destProp = new Value destPtr, [access]
-      destProp.computedType = fty
       srcProp = new Value srcPtr, [access]
-      srcProp.computedType = fty
       asn = new Assign destProp, srcProp
-      asn.computedType = fty
+      destProp.computedType = srcProp.computedType = asn.computedType = field.type
       stmts.push asn
   else
     for i in [0...ty.size]
@@ -843,9 +840,10 @@ Code::transformNode = (o) ->
       for arg in param.variables when arg.binding.onStack
         plh = new Value new Literal arg.name
         prh = new Value new Literal arg.name
-        asn = new Assign plh, prh
-        asn.computedType = plh.computedType = prh.computedType = arg.type
+        plh.computedType = plh.base.computedType = prh.computedType = arg.type
         plh.computedBinding = arg.binding
+        asn = new Assign plh, prh
+        asn.computedType = arg.type
         exprs.unshift asn
     o.frameSize = frameSize
     stackFence o, exprs, frameSize
@@ -854,20 +852,17 @@ Code::transformNode = (o) ->
 # Add SP computation and pointer conversions to explicit returns.
 Return::transformNode = (o) ->
   # First transform for pointer conversion.
-  @expression = ty.coerce?(@expression) if ty = o.returnType
+  @expression = ty.coerce @expression if (ty = o.returnType)?.coerce?
   # Then transform for any stack fencing we need to do.
   return unless (frameSize = o.frameSize) and opts.unsafe
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
   if expr = @expression
-    body = new Block
-    body.transformNode = (o) ->
-      tmp = new Value freshVariable 't'
-      @expressions = [new Assign(tmp, expr), restoreStack, tmp]
-      return
-  else
-    body = new Block [restoreStack, new Return]
-  @expression = new Value new Parens body
-  return
+    tmp = new Value freshVariable 't'
+    body = [new Assign(tmp, expr), restoreStack, tmp]
+    @expression = new Value new Parens new Block body
+    return
+  this.transformNode = null
+  return new Block [restoreStack, this]
 
 # Need to convert pointers when passing them as arguments.
 Call::transformNode = (o) ->

@@ -98,7 +98,8 @@ exports.Base = class Base
   # Note that this is overridden for smarter behavior for
   # many statement nodes (e.g. If, For)...
   makeReturn: (res) ->
-    me = @unwrapAll()
+    me = this
+    continue until me instanceof Value or me is me = me.unwrap()
     if res
       new Call new Literal("#{res}.push"), [me]
     else

@@ -186,6 +186,7 @@ grammar =
   Type: [
     o 'IDENTIFIER',                                     -> new TypeName $1
     o '* IDENTIFIER',                                   -> new PointerType new TypeName $2
+    o '-> INDENT Type OUTDENT',                         -> new ArrowType [], $3
     o 'PARAM_START ParamTypeList PARAM_END ->
        INDENT Type OUTDENT',                            -> new ArrowType $2, $6
     o 'STRUCT { StructFieldList OptComma }',            -> new StructType $3
