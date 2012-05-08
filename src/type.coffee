@@ -502,8 +502,6 @@ Value::computeType = (r, o) ->
 Code::computeType = (r, o) ->
   return @computedType if @typeCached
   @typeCached = true
-  # Cache the stack-allocated variables and their offsets.
-  @spOffsets = spOffsets o.scope
   @frameSize = o.scope.frameSize
   # Arriving in this function means that all the parameters typechecked, since
   # this is called after the body has been processed. So we just need to
@@ -752,13 +750,6 @@ putOnStack = (scope, name) ->
   scope.frameSize = bind.spOffset + bind.type.size
   return
 
-# Condense a typed scope to a map of variable names to sp offsets.
-spOffsets = (scope) ->
-  offsets = []
-  for { name, type: bind } in scope.variables when bind.onStack
-    offsets.push { name, offset: bind.spOffset, ty: bind.type }
-  offsets
-
 # Dereference something in a heap view.
 makeDeref = (o, base, baseTy, offset, offsetTy) ->
   new Value offsetTy.view(o), [new Index offsetExpr base, baseTy, offset, offsetTy]
@@ -821,13 +812,11 @@ structLiteral = (v, ty, o) ->
 # `try..finally` block to account for possible throws. If the user indicated
 # `gotta-go-fast`, we'll only emit stack pointer computations for explicit
 # returns.
-stackFence = (o, exprs, frameSize, spOffsets, isRoot) ->
+stackFence = (o, exprs, frameSize, isRoot) ->
   # The stack uses `U32`, so record it manually.
   U32(o)
   # Assign all the on-stack locals to their addresses.
   scope = o.scope
-  for { name, offset, ty } in spOffsets
-    exprs.unshift new Assign new Value(new Literal name), stackOffsetExpr(offset, ty)
   exprs.unshift new Assign SP, normalizePtr(SPREAL, U32.BYTES_PER_ELEMENT, 1)
   exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
@@ -851,20 +840,15 @@ Code::transformNode = (o) ->
     # argument.
     exprs = @body.expressions
     for param in @params
-      for arg in param.variables
-        if arg.binding.onStack
-          arg.save = freshVariable arg.name
-          plh = new Value new Literal arg.name
-          prh = new Value arg.save
-          asn = new Assign plh, prh
-          asn.computedType = plh.computedType = prh.computedType = arg.type
-          plh.computedBinding = arg.binding
-          exprs.unshift asn
+      for arg in param.variables when arg.binding.onStack
+        plh = new Value new Literal arg.name
+        prh = new Value new Literal arg.name
+        asn = new Assign plh, prh
+        asn.computedType = plh.computedType = prh.computedType = arg.type
+        plh.computedBinding = arg.binding
+        exprs.unshift asn
     o.frameSize = frameSize
-    stackFence o, exprs, frameSize, @spOffsets
-    for param in @params
-      for { name, save } in param.variables
-        exprs.unshift new Assign new Value(save), new Value new Literal name
+    stackFence o, exprs, frameSize
   return
 
 # Add SP computation and pointer conversions to explicit returns.
@@ -901,14 +885,17 @@ Value::transformNode = (o) ->
   base  = @base
   inner = base.unwrapAll()
   props = @properties
+  bind  = @computedBinding
   unless props.length
     if inner instanceof Literal
-      if @computedBinding?.onStack and
-         ty not instanceof StructType and not inner.noStackDeref
+      if bind?.onStack
         # Treat stack accesses as dereferences, except for structs, which are
         # kept as offsets. FIXME: it's unclear what raw use of a
         # stack-allocated struct means right now.
-        return new Value U32(o), [new Index new Value new Literal inner.value]
+        offset = stackOffsetExpr bind.spOffset, bind.type
+        if ty instanceof StructType
+          return offset
+        return new Value U32(o), [new Index offset]
       if inner.value is 'null' and ty instanceof PointerType
         # This matters for TI: null will cause the typeset of pointers to be
         # dimorphic.
@@ -918,6 +905,7 @@ Value::transformNode = (o) ->
   # weren't.
   v = if inner.isDeref?() then inner.first else base
   vty = v.unwrapAll().computedType
+  v = stackOffsetExpr bind.spOffset, bind.type if bind?.onStack
   cumulativeOffset = 0
   for prop in props
     field = prop.computedField
@@ -1099,7 +1087,6 @@ exports.analyzeTypes = (root, o) ->
   root.foldChildren null, 'declareType', null, options
   options.crossScope = true
   root.foldChildren null, 'primeComputeType', 'computeType', options
-  root.spOffsets = spOffsets scope
   root.frameSize = scope.frameSize
   root.transformRoot = (o) ->
     # Require the heap. This has to be done using `o.scope.assign`, to make sure
@@ -1109,7 +1096,7 @@ exports.analyzeTypes = (root, o) ->
     exprs = @expressions
     if frameSize = @frameSize
       o.frameSize = frameSize
-      stackFence o, exprs, frameSize, @spOffsets, yes
+      stackFence o, exprs, frameSize, yes
     # Bring in `malloc` if this module needs it.
     if scope.needsMalloc
       obj = new Value new Obj [MALLOC, FREE]
