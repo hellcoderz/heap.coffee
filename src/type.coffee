@@ -304,14 +304,14 @@ ArrowType::lint = (types) ->
 # Unify two types, if possible, into a single type. If `assign` is true, then
 # this behaves asymmetrically for pointer types and automatic promotions of
 # primitive types.
-unify = (types, lty, rty, assign) ->
+unify = (types, lty, rty, assigning) ->
   # Unify is reflexive.
   return lty if lty is rty
   # If the left side is dynamic, the entire expression is dynamic.
   return unless lty and rty
   # Two pointer types are unifiable iff their bases are size compatible.
   if lty instanceof PointerType and rty instanceof PointerType
-    if assign
+    if assigning
       # Assigning a narrower pointer to a wider one may mess up due to
       # alignment, since all views are aligned.
       if rty.base and rty.baseAlignment() < lty.baseAlignment()
@@ -327,8 +327,8 @@ unify = (types, lty, rty, assign) ->
     return unless lptys.length is rptys.length
     ptys = []
     for lpty, i in lptys
-      ptys.push unify types, lpty, rptys[i], assign
-    return new ArrowType ptys, unify(types, lty.ret, rty.ret, assign)
+      ptys.push unify types, lpty, rptys[i], assigning
+    return new ArrowType ptys, unify(types, lty.ret, rty.ret, assigning)
   if lty instanceof PointerType and rty in integral
     printWarn "conversion from `#{rty}' to pointer without cast"
     return lty
@@ -340,7 +340,7 @@ unify = (types, lty, rty, assign) ->
     # If we're assigning, return the left type, else return the wider primitive.
     if lty.size isnt rty.size
       printWarn "conversion from `#{rty}' to `#{lty}' may alter its value"
-      return if assign then lty else if lty.size > rty.size then lty else rty
+      return if assigning then lty else if lty.size > rty.size then lty else rty
     # Return the sign of the left type if they're the same size. This is just
     # to break the tie arbitrarily and to behave as expected for assignments.
     if lty.signed isnt rty.signed
@@ -405,31 +405,65 @@ Cast::computeType = (r, o) ->
   @computedType = @type.lint o.types
 
 # Assignments do asymmetric type unification.
+assign = (o, lval, rval, context) ->
+  if lval instanceof Value
+    if lval.isArray()
+      rval = if rval.isArray() then rval.base else null
+    else if lval.isObject()
+      rval = if rval.isObject() then rval.base else null
+    else if lval.this
+      return
+    lval = lval.base
+  if lval instanceof Literal and lty = lval.computedType
+    # As a convenience if the left-hand side is a pointer and the right-hand
+    # side is 0, replace the right-hand side with null, which has the type *any
+    # to suppress int-to-pointer warnings.
+    if rval?
+      value = rval.unwrapAll()
+      if lty instanceof PointerType and value instanceof Literal and value.value is '0'
+        value.computedType = anyPtrTy
+      # `context` can only be passed in from `Assign::computeType'. This is okay
+      # since compound assignments only have **SimpleAssignable**s as lvals.
+      rty = if context
+        op = context.substr 0, context.indexOf '='
+        binopType o, op, lty, value.computedType, lval
+      else
+        value.computedType
+    else
+      rty = null
+    unless unify o.types, lty, rty, true
+      msg = "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
+      if context
+        error lval, msg + " using #{context}"
+      else
+        error lval, msg
+  else if lval instanceof Arr
+    robjects = rval?.objects
+    assign o, lel, robjects?[i] for lel, i in lval.objects
+  else if lval instanceof Obj
+    # Build property-name mapping.
+    props = {}
+    if rval?
+      for prop in rval.properties
+        prop = prop.variable if prop.isComplex()
+        if prop?
+          propName = prop.unwrapAll().value.toString()
+          props[propName] = prop
+    for obj in lval.objects
+      if obj instanceof Assign
+        assign o, obj.value, props[obj.variable.unwrapAll().value]
+      else if obj instanceof Value
+        assign o, obj.base, props[obj.base.unwrapAll().value]
+
 Assign::computeType = (r, o) ->
   if @context is 'object'
     delete @variable.computedType
     return
   return @computedType if @typeCached
   @typeCached = true
-  return unless lty = @variable.unwrapAll().computedType
-  # As a convenience if the left-hand side is a pointer and the right-hand
-  # side is 0, replace the right-hand side with null, which has the type *any
-  # to suppress int-to-pointer warnings.
-  value = @value.unwrapAll()
-  if lty instanceof PointerType and value instanceof Literal and value.value is '0'
-    value.computedType = anyPtrTy
-  rty = value.computedType
-  context = @context
-  @computedType = if context
-    binopType context.substr(0, context.indexOf('=')), lty, rty
-  else
-    unify o.types, lty, rty, true
-  unless @computedType
-    msg = "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
-    if context
-      error @variable, msg + " using #{context}"
-    else
-      error @variable, msg
+  assign o, (variable = @variable), @value, @context
+  # Complex left-hand sides (destructuring assignments) always have dynamic type.
+  @computedType = variable.computedType unless variable.isComplex()
 
 # Accesses on struct types may be typed. If we arrived at this case it's
 # because `unwrapAll()` didn't manage to unwrap value, i.e. this is a properties
@@ -505,22 +539,22 @@ ARITH   = [ '+', '-', '*', '/' ]
 BITWISE = [ '<<', '>>', '>>>', '~', '&', '|' ]
 COMPARE = [ '===', '!==', '<', '>', '<=', '>=' ]
 
-binopType = (op, ty1, ty2) ->
+binopType = (o, op, ty1, ty2, node) ->
   if (op is '+' or op is '-') and ty1 instanceof PointerType
     if ty2 in integral
       ty1
     else if op is '-' and ty2 instanceof PointerType
       unless unify o.types, ty1.base, ty2.base
-        printWarn "pointer subtraction on incompatible pointer types `#{ty1}' and `#{ty2}'"
+        printWarn "pointer subtraction on incompatible pointer types `#{tystr(ty1)}' and `#{ty2}'"
       i32ty
     else
-      error this, "invalid operand type `#{ty2}' for pointer arithmetic"
+      error node, "invalid operand type `#{tystr(ty2)}' for pointer arithmetic"
   else if op is '%'
     i32ty
   else if op in COMPARE
     if ty1 instanceof PointerType and ty2 instanceof PointerType and
        not unify o.types, ty1, ty2
-      printWarn "comparison between incompatible pointer types `#{ty1}' and `#{ty2}'"
+      printWarn "comparison between incompatible pointer types `#{tystr(ty1)}' and `#{tystr(ty2)}'"
     i32ty
   else if op in BITWISE
     i32ty
@@ -577,25 +611,7 @@ Op::computeType = (r, o) ->
     ty1 = ty2
     ty2 = tmp
 
-  @computedType = if (op is '+' or op is '-') and ty1 instanceof PointerType
-    unless ty2 in integral
-      error this, "invalid operand type `#{ty2}' for pointer arithmetic"
-    ty1
-  else if op is '-' and ty1 instanceof PointerType and ty2 instanceof PointerType
-    unless unify o.types, ty1.base, ty2.base
-      printWarn "pointer subtraction on incompatible pointer types `#{ty1}' and `#{ty2}'"
-    i32ty
-  else if op is '%'
-    i32ty
-  else if op in COMPARE
-    if ty1 instanceof PointerType and ty2 instanceof PointerType and
-       not unify o.types, ty1, ty2
-      printWarn "comparison between incompatible pointer types `#{ty1}' and `#{ty2}'"
-    i32ty
-  else if op in BITWISE
-    i32ty
-  else if op in ARITH and ty1 in numeric and ty2 in numeric
-    f64ty
+  @computedType = binopType o, op, ty1, ty2, this
 
 # Gather return expressions.
 returnExpressions = (body) ->
@@ -671,61 +687,57 @@ Code::primeComputeType = (r, o) ->
 # Declaring a type associates a type with the variable in the current
 # scope. Destructuring is allowed, but each destructured variable must get a
 # simple type, i.e. not a **TypeArr** or a **TypeObj**.
-declare = (scope, v, ty, node) ->
+declare = (scope, v, ty, variables) ->
   if v instanceof Literal
     name = v.value
-    error node, "cannot redeclare typed variable `#{name}'" if scope.check name
+    error v, "cannot redeclare typed variable `#{name}'" if scope.check name
     return unless ty
     if ty instanceof TypeArr or ty instanceof TypeObj
-      error node, "cannot type non-destructuring variable with destructuring type `#{ty}'"
+      error v, "cannot type non-destructuring variable with destructuring type `#{ty}'"
     bind = new Binding ty
     scope.add name, bind
-    node.variables.push { name, type: ty, binding: bind }
+    variables.push { name, type: ty, binding: bind }
     putOnStack scope, name if ty instanceof StructType
     return
   if v instanceof Value
-    error node, "cannot type properties" if v.hasProperties()
+    error v, "cannot type properties" if v.hasProperties()
     v = v.base
   if v instanceof Arr
     els = v.objects
     unless ty instanceof TypeArr
-      error node, "cannot type destructuring array with non-destructuring array type `#{ty}'"
+      error v, "cannot type destructuring array with non-destructuring array type `#{ty}'"
     for el, i in els
       if el.this
-        error node, "cannot type @-names"
+        error v, "cannot type @-names"
       else
-        declare scope, el.base, ty.elements[i], node
+        declare scope, el.base, ty.elements[i], variables
     return
   if v instanceof Obj
     objs = v.objects
     unless ty instanceof TypeObj
-      error node, "cannot type destructuring object with non-destructuring object type `#{ty}'"
+      error v, "cannot type destructuring object with non-destructuring object type `#{ty}'"
     for obj in objs
       if obj instanceof Assign
         name = obj.variable.base
-        declare scope, name, ty.names[name.value]?.type, node
+        declare scope, obj.value, ty.names[name.value]?.type, variables
       else if obj.this
-        error node, "cannot type @-names"
+        error v, "cannot type @-names"
       else
         name = obj.base
-        declare scope, name, ty.names[name.value]?.type, node
+        declare scope, name, ty.names[name.value]?.type, variables
     return
-  error node, "trying to type non-typeable"
+  error v, "trying to type non-typeable"
 
 DeclareType::declareType = (r, o) ->
-  type  = @type.lint o.types
   scope = o.scope
-  @variables = []
-  declare scope, v, type, this for v in @typeables
+  declare scope, v, @type.lint(o.types), (@variables = []) for v in @typeables
   return
 
 Param::declareType = (r, o) ->
   # Lint just in case the user manually declared the parameter types and
   # thus the types were not linted before this point.
-  type  = @type.lint o.types
   scope = o.scope
-  @variables = []
-  declare scope, this.name, type, this
+  declare scope, this.name, @type.lint(o.types), (@variables = [])
   return
 
 #### AST Transformation
@@ -774,9 +786,9 @@ inlineMemcpy = (o, dest, src, ty) ->
       destProp.computedType = fty
       srcProp = new Value srcPtr, [access]
       srcProp.computedType = fty
-      assign = new Assign destProp, srcProp
-      assign.computedType = fty
-      stmts.push assign
+      asn = new Assign destProp, srcProp
+      asn.computedType = fty
+      stmts.push asn
   else
     for i in [0...ty.size]
       offset = new Value new Literal i
@@ -842,10 +854,10 @@ Code::transformNode = (o) ->
           arg.save = freshVariable arg.name
           plh = new Value new Literal arg.name
           prh = new Value arg.save
-          assign = new Assign plh, prh
-          assign.computedType = plh.computedType = prh.computedType = arg.type
+          asn = new Assign plh, prh
+          asn.computedType = plh.computedType = prh.computedType = arg.type
           plh.computedBinding = arg.binding
-          exprs.unshift assign
+          exprs.unshift asn
     o.frameSize = frameSize
     stackFence o, exprs, frameSize, @spOffsets
     for param in @params
@@ -943,12 +955,15 @@ Op::transformNode = (o) ->
       new Call FREE, [@first]
     else if op is 'sizeof'
       new Literal @first.size
-    else if op is '&' and ty1 = @computedType.base
-      # The typechecker guarantees that `@first` is assignable, so if we're
-      # taking the address of a stack variable, `@first.unwrapAll()` must be
-      # the literal of that variable.
-      @first.unwrapAll().noStackDeref = true
-      @first
+    else if op is '&'
+      if @computedType.base instanceof StructType
+        # If we're taking the pointer of a struct, we don't need to do anything
+        # since structs are kept as pointers.
+        @first
+      else
+        # Otherwise we must be doing a dereference, so transform it now and
+        # get out the index expression, which must be the address.
+        @first.unwrapAll().transformNode(o).properties[0].index
     else if op is '*'
       # This is only called when this deref is _not_ the base of a struct
       # access, as in struct accesses, dereferencing is the same as not
