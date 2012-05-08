@@ -49,10 +49,15 @@ exports.Base = class Base
   transform: (o) ->
     # Before we compile, do we need to transform any of its children?
     for attr in @children when child = @[attr]
-      if child instanceof Array and child.length
-        @transformArray child, o
+      if child instanceof Array
+        @transformArray child, o if child.length
       else if trans = child.transformNode?(o)
         @[attr] = trans
+      else
+        # Transform unwraps eagerly because the compiler sometimes unwraps and
+        # compiles instead of normally compiling the wrapper.
+        node = child
+        node.transform o until node is node = node.unwrap()
     this
 
   transformArray: (arr, o) ->
@@ -396,7 +401,7 @@ exports.TypeObj = class TypeObj extends Base
     else
       "{#{@fields.join(', ')}}"
 
-exports.TypeObjField = class ObjField extends Base
+exports.TypeObjField = class TypeObjField extends Base
   constructor: (@name, @type) ->
 
   toString: (lvl = 0) ->
