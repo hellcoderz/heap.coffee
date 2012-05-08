@@ -829,7 +829,7 @@ stackFence = (o, exprs, frameSize, isRoot) ->
 
 # Coerce to a type.
 Cast::transformNode = (o) ->
-  return @computedType.coerce?(@expr)
+  return @computedType.coerce?(@expr) or @expr
 
 # Add `SP` computations and bring in heap views if needed.
 Code::transformNode = (o) ->
@@ -929,7 +929,7 @@ Assign::transformNode = (o) ->
     return inlineMemcpy o, (if lval.isDeref?() then lval.first else @variable), @value, lty
   if lty instanceof PointerType and @context and (au = alignmentUnits lty.base) isnt 1
     @value = new Op('*', @value, new Value new Literal au)
-  else if lty.coerce
+  else if lty.coerce?
     @value = lty.coerce @value
   return
 
