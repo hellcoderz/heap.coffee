@@ -408,12 +408,14 @@ Cast::computeType = (r, o) ->
 assign = (o, lval, rval, context) ->
   if lval instanceof Value
     if lval.isArray()
+      lval = lval.base
       rval = if rval.isArray() then rval.base else null
     else if lval.isObject()
+      lval = lval.base
       rval = if rval.isObject() then rval.base else null
     else if lval.this
       return
-    lval = lval.base
+    lval = lval.unwrapAll()
   if lval instanceof Literal and lty = lval.computedType
     # As a convenience if the left-hand side is a pointer and the right-hand
     # side is 0, replace the right-hand side with null, which has the type *any
@@ -737,7 +739,7 @@ Param::declareType = (r, o) ->
   # Lint just in case the user manually declared the parameter types and
   # thus the types were not linted before this point.
   scope = o.scope
-  declare scope, this.name, @type.lint(o.types), (@variables = [])
+  declare scope, this.name, @type?.lint(o.types), (@variables = [])
   return
 
 #### AST Transformation
@@ -888,8 +890,8 @@ Call::transformNode = (o) ->
   return unless fty = @variable?.unwrapAll().computedType
   paramTys = fty.params
   args = @args
-  for pty, i in fty.params
-    args[i] = pty.coerce?(args[i])
+  for pty, i in fty.params when pty?.coerce?
+    args[i] = pty.coerce args[i]
   return
 
 # Transform this Value into a new Value that does offset index lookups on

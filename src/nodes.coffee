@@ -1361,7 +1361,7 @@ exports.Code = class Code extends Base
     code  = 'function'
     code  += ' ' + @name if @ctor
     code  += '(' + params.join(', ') + ') {'
-    code  += ' // :: (' + @paramTypes + ')' if @paramTypes
+    code  += ' // :: (' + (tystr(p) for p in @paramTypes).join(', ') + ')' if @paramTypes
     code  += "\n#{ @body.compileWithDeclarations o }\n#{@tab}" unless @body.isEmpty()
     code  += '}'
     return @tab + code if @ctor
