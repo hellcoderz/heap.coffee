@@ -913,7 +913,7 @@ Assign::transformNode = (o) ->
     lval = @variable.unwrapAll()
     return inlineMemcpy o, (if lval.isDeref?() then lval.first else @variable), @value, lty
   if lty instanceof PointerType and @context and (au = alignmentUnits lty.base) isnt 1
-    @value = new Op('*', @value, new Value new Literal au)
+    @value = multExpr @value, au
   else if lty.coerce?
     @value = lty.coerce @value
   return
@@ -959,7 +959,7 @@ Op::transformNode = (o) ->
       new Value new Parens new Block [new Assign(@first, size, op1),
                                       new Op(op2, @first, size)]
   else
-    # Don't return a new Op so we don't have to set transform to null to
+    # Don't return a new **Op** so we don't have to set transform to null to
     # prevent unbounded recursion.
     ty1 = @first.computedType
     ty2 = @second.computedType
@@ -968,11 +968,10 @@ Op::transformNode = (o) ->
          (au = alignmentUnits ty1.base) isnt 1) or
         (ty2 instanceof PointerType and ty1 in integral and
          (au = alignmentUnits ty2.base) isnt 1))
-      size = new Value new Literal au
       if ty1 instanceof PointerType
-        @second = new Op('*', @second, size)
+        @second = multExpr @second, au
       else
-        @first = new Op('*', @first, size)
+        @first = multExpr @first, au
     else if op in COMPARE and
          ty1 instanceof PointerType and ty2 instanceof PointerType
       # By convention always normalize the second operand.
