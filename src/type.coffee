@@ -76,10 +76,10 @@ normalizePtr = (ptr, lalign, ralign) ->
   # Compute the ratio.
   if lalign < ralign
     ratio = ralign / lalign
-    op = '<<'
+    op = '>>'
   else
     ratio = lalign / ralign
-    op = '>>'
+    op = '<<'
   # Pretty sure this is true all the time, commenting it out for now.
   # if ratio and not ((ratio & (ratio - 1)) is 0)
   #   error this, "ratio between primitive type sizes must be a power of 2"
@@ -730,7 +730,8 @@ declare = (scope, v, ty, variables) ->
 
 DeclareType::declareType = (r, o) ->
   scope = o.scope
-  declare scope, v, @type.lint(o.types), (@variables = []) for v in @typeables
+  @variables = variables = []
+  declare scope, v, @type.lint(o.types), variables for v in @typeables
   return
 
 Param::declareType = (r, o) ->
@@ -759,31 +760,18 @@ inlineMemcpy = (o, dest, src, ty) ->
   scope = o.scope
   stmts = []
   # Store the pointer to the struct we're copying to.
-  destPtr = freshVariable 'dest'
-  destPtr.computedType = dest.computedType
-  stmts.push new Assign new Value(destPtr), dest
+  destPtr = new Value freshVariable 'dest'
+  destPtr.computedType = destPtr.base.computedType = ty
+  stmts.push new Assign destPtr, dest
   # Store the pointer to the struct we're copying from.
-  srcPtr = freshVariable 'src'
-  srcPtr.computedType = src.computedType
+  srcPtr = new Value freshVariable 'src'
+  srcPtr.computedType = srcPtr.base.computedType = ty
   stmts.push new Assign new Value(srcPtr), src
   # Unroll the copy loop over the bytes.
-  if ty instanceof StructType
-    # We can do better than byte-by-byte if we're memcpying a struct. We need
-    # to manually set the computedType so they get transformed properly in
-    # `Value::transformNode`.
-    for field in ty.fields
-      access = new Access new Literal field.name
-      access.computedField = field
-      destProp = new Value destPtr, [access]
-      srcProp = new Value srcPtr, [access]
-      asn = new Assign destProp, srcProp
-      destProp.computedType = srcProp.computedType = asn.computedType = field.type
-      stmts.push asn
-  else
-    for i in [0...ty.size]
-      offset = new Value new Literal i
-      stmts.push new Assign new Value(U8(o), [new Index new Op '+', new Value(destPtr), offset]),
-                            new Value(U8(o), [new Index new Op '+', new Value(srcPtr), offset])
+  align = ty.view.BYTES_PER_ELEMENT
+  for i in [0...alignmentUnits ty]
+    stmts.push new Assign makeDeref(o, destPtr, ty, i * align, ty),
+                          makeDeref(o, srcPtr, ty, i * align, ty)
   stmts.push new Value destPtr
   new Value new Parens new Block stmts
 
@@ -814,7 +802,8 @@ stackFence = (o, exprs, frameSize, isRoot) ->
   U32(o)
   # Assign all the on-stack locals to their addresses.
   scope = o.scope
-  exprs.unshift new Assign SP, normalizePtr(SPREAL, U32.BYTES_PER_ELEMENT, 1)
+  exprs.unshift new Assign SP, normalizePtr(SPREAL, SPREAL.computedType.view.BYTES_PER_ELEMENT,
+                                                    SP.computedType.view.BYTES_PER_ELEMENT)
   exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
   if opts.unsafe
@@ -890,7 +879,7 @@ Value::transformNode = (o) ->
         offset = stackOffsetExpr bind.spOffset, bind.type
         if ty instanceof StructType
           return offset
-        return new Value U32(o), [new Index offset]
+        return new Value ty.view(o), [new Index offset]
       if inner.value is 'null' and ty instanceof PointerType
         # This matters for TI: null will cause the typeset of pointers to be
         # dimorphic.
@@ -903,6 +892,7 @@ Value::transformNode = (o) ->
   v = stackOffsetExpr bind.spOffset, bind.type if bind?.onStack
   cumulativeOffset = 0
   for prop in props
+    vty = vty.base if vty instanceof PointerType
     field = prop.computedField
     if (fty = field.type) instanceof StructType
       cumulativeOffset += field.offset
@@ -910,8 +900,8 @@ Value::transformNode = (o) ->
       v = makeDeref o, v, vty, field.offset + cumulativeOffset, fty
       vty = fty
       cumulativeOffset = 0
-  if fty instanceof StructType and cumulativeOffset isnt 0
-    new Op '+', v, new Value new Literal cumulativeOffset
+  if cumulativeOffset isnt 0
+    offsetExpr v, vty, cumulativeOffset, fty
   else
     v
 
@@ -953,7 +943,7 @@ Op::transformNode = (o) ->
       # This is only called when this deref is _not_ the base of a struct
       # access, as in struct accesses, dereferencing is the same as not
       # dereferencing, since . is extended to work like -> in C.
-      ty1 = @first.computedType
+      ty1 = @computedType
       makeDeref o, @first, ty1, 0, ty1
     else if (op is '++' or op is '--') and
             (ty1 = @computedType) instanceof PointerType and
