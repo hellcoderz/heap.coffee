@@ -197,7 +197,7 @@ PointerType::lint = (types) ->
 PointerType::coerce = (expr) ->
   ty = expr.unwrapAll().computedType
   return expr unless ty instanceof PointerType and ty isnt this
-  normalizePtr expr, this.baseAlignment(), ty.baseAlignment()
+  normalizePtr expr, ty.baseAlignment(), this.baseAlignment()
 
 TypeArr::lint = (types) ->
   return this if @linted
