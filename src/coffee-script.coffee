@@ -35,8 +35,7 @@ exports.helpers = require './helpers'
 exports.compile = compile = (code, options = {}) ->
   {merge} = exports.helpers
   try
-    ast = parser.parse lexer.tokenize code
-    options.types = analyzeTypes ast, options
+    ast = analyzeTypes parser.parse(lexer.tokenize code), options
     js = ast.compile options
     return js unless options.header
   catch err
@@ -59,6 +58,14 @@ exports.nodes = (source, options) ->
     parser.parse lexer.tokenize source, options
   else
     parser.parse source
+
+# Parse a string of CoffeeScript and return the transformed AST tree.
+exports.transnodes = (source, options) ->
+  ast = if typeof source is 'string'
+    parser.parse lexer.tokenize source, options
+  else
+    parser.parse source
+  analyzeTypes ast, options
 
 # Compile and execute a string of CoffeeScript (on the server), correctly
 # setting `__filename`, `__dirname`, and relative `require()`.

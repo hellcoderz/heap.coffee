@@ -6,11 +6,11 @@
 {Scope} = require './scope'
 {Base, Parens, Block, Value, Literal, Op, Assign, Try, If, Switch, Param,
  Code, Index, Access, Call, Return, Obj, While, Comment, Arr, Obj,
- TypeAssign, DeclareType, Cast, TypeArr, TypeObj,
+ TypeAssign, DeclareType, Cast, TypeArr, TypeObj, TypeObjField,
  TypeName, PointerType, ArrowType, StructType} = require './nodes'
-{flatten, extend, tystr} = require './helpers'
+{flatten, last, extend, tystr} = require './helpers'
 
-# Raise a type error.
+# Raise a type error with line information.
 error = (node, msg) ->
   err = new TypeError msg
   err.lineno = node.lineno
@@ -20,51 +20,49 @@ error = (node, msg) ->
 
 # The heap module that holds all the views.
 HEAP    = new Value new Literal '_HEAP'
+
 # Views.
-I8V     = new Literal '_I8'
-U8V     = new Literal '_U8'
-I16V    = new Literal '_I16'
-U16V    = new Literal '_U16'
-I32V    = new Literal '_I32'
-U32V    = new Literal '_U32'
-F32V    = new Literal '_F32'
-F64V    = new Literal '_F64'
+class ViewLiteral extends Literal
+  constructor: (@value, @BYTES_PER_ELEMENT) ->
+
+  compileNode: (o) ->
+    name = @value
+    o.scope.assign name, "#{HEAP.base.value}.#{name.substr name.lastIndexOf('_') + 1}"
+    super o
+
+I8     = new ViewLiteral '_I8',  1
+U8     = new ViewLiteral '_U8',  1
+I16    = new ViewLiteral '_I16', 2
+U16    = new ViewLiteral '_U16', 2
+I32    = new ViewLiteral '_I32', 4
+U32    = new ViewLiteral '_U32', 4
+F32    = new ViewLiteral '_F32', 4
+F64    = new ViewLiteral '_F64', 8
+
 # The cached stack pointer.
 SP      = new Value new Literal '_SP'
 # The actual stack pointer.
-SPREAL  = new Value U32V, [new Index new Value new Literal 1]
+SPREAL  = new Value U32, [new Index new Value new Literal 1]
 # Memory operations.
 MALLOC  = new Value new Literal 'malloc'
 FREE    = new Value new Literal 'free'
 MEMCPY  = new Value new Literal 'memcpy'
 
-# Functions to get to the views, but also record in the scope that the view
-# has been used so we can bring it in.
-recorderForView = (view) -> (o) ->
-  name = view.value
-  # The exported view from the heap module doesn't start with underscores.
-  o.scope.assign name, "#{HEAP.base.value}.#{name.substr name.lastIndexOf('_') + 1}"
-  view
-I8  = recorderForView I8V
-U8  = recorderForView U8V
-I16 = recorderForView I16V
-U16 = recorderForView U16V
-I32 = recorderForView I32V
-U32 = recorderForView U32V
-F32 = recorderForView F32V
-F64 = recorderForView F64V
-
-# Since all typed array views are aligned, we record the various views' sizes
-# here for use in computing shifts.
-I8.BYTES_PER_ELEMENT  = U8.BYTES_PER_ELEMENT  = 1
-I16.BYTES_PER_ELEMENT = U16.BYTES_PER_ELEMENT = 2
-I32.BYTES_PER_ELEMENT = U32.BYTES_PER_ELEMENT = 4
-F32.BYTES_PER_ELEMENT = 4
-F64.BYTES_PER_ELEMENT = 8
-
 # Global option for if we should print warnings.
 opts = { warn: false, unsafe: false }
 printWarn = (line) -> process.stderr.write 'warning: ' + line + '\n' if opts.warn
+
+# Ensure that a variable is fresh by getting a fresh name just-in-time.
+class FreshLiteral extends Literal
+  constructor: (@value, @type) ->
+
+  compileNode: (o) ->
+    @value = o.scope.freeVariable @value
+    @compileNode = Literal::compileNode
+    super o
+
+  typeTransformNode: (o) ->
+    this
 
 # Convert a pointer aligned according to `lalign` to one aligned to `ralign`.
 normalizePtr = (ptr, lalign, ralign) ->
@@ -98,8 +96,8 @@ offsetExpr = (base, baseTy, offset, offsetTy) ->
     normalized
 
 # Calls `offsetExpr` with the stack pointer.
-stackOffsetExpr = (offset, offsetTy) ->
-  offsetExpr SP, SP.computedType, offset, offsetTy
+stackOffsetExpr = (o, offset, offsetTy) ->
+  offsetExpr SP, i32ty, offset, offsetTy
 
 # Multiply by a size. If the size is a power of 2, use left shift.
 multExpr = (base, size) ->
@@ -109,14 +107,103 @@ multExpr = (base, size) ->
   else
     new Op '*', base, new Value new Literal size
 
-# Ensure that a variable is fresh by transforming just-in-time.
-freshVariable = (name) ->
-  lit = new Literal
-  lit.transformNode = (o) ->
-    @value = o.scope.freeVariable name
-    delete this.transformNode
-    return
-  lit
+# Transform a function to have the right stack pointer computations upon entry
+# and exit. The safe way is to wrap the entire body of the function in a
+# `try..finally` block to account for possible throws. If the user indicated
+# `gotta-go-fast`, we'll only emit stack pointer computations for explicit
+# returns.
+stackFence = (o, exprs, frameSize, isRoot) ->
+  t = new Assign SP, normalizePtr(SPREAL, U8.BYTES_PER_ELEMENT, I32.BYTES_PER_ELEMENT)
+  exprs.unshift new Assign SP, normalizePtr(SPREAL, U8.BYTES_PER_ELEMENT, I32.BYTES_PER_ELEMENT)
+  exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
+  restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
+  if opts.unsafe
+    exprs.push restoreStack if isRoot
+  else
+    exprs[0] = new Try new Block(exprs.slice()), null, null, new Block [restoreStack]
+    exprs.length = 1
+  return
+
+# Coerce to an integral type.
+coerceIntegral = (width, signed) -> (expr, ty) ->
+  return expr unless ty isnt this
+  # Do we need to truncate? Bitwise operators automatically truncate to 32
+  # bits in JavaScript so if the width is 32, we don't need to do manual
+  # truncation.
+  tywidth = ty.size << 3
+  if width isnt 32 and tywidth > width
+    c = new Op '&', expr, new Value new Literal '0x' + ((1 << width) - 1).toString(16)
+    # Do we need to sign extend?
+    if signed
+      shiftBy = new Value new Literal 32 - width
+      c = new Op '>>', new Op('<<', c, shiftBy), shiftBy
+    c
+  else if width isnt tywidth or ty.signed isnt signed
+    new Op (if signed then '|' else '>>>'), expr, new Value new Literal '0'
+  else
+    expr
+
+# Dereference something in a heap view.
+makeDeref = (o, base, baseTy, offset, offsetTy) ->
+  new Value offsetTy.view, [new Index offsetExpr base, baseTy, offset, offsetTy]
+
+# Generate an inline memcpy.
+inlineMemcpy = (o, dest, src, ty) ->
+  stmts = []
+  # Store the pointer to the struct we're copying to.
+  destPtr = new Value new FreshLiteral 'dest'
+  stmts.push new Assign destPtr, dest
+  # Store the pointer to the struct we're copying from.
+  srcPtr = new Value new FreshLiteral 'src'
+  stmts.push new Assign new Value(srcPtr), src
+  # Unroll the copy loop over the bytes.
+  align = ty.view.BYTES_PER_ELEMENT
+  for i in [0...alignmentUnits ty]
+    stmts.push new Assign makeDeref(o, destPtr, ty, i * align, ty),
+                          makeDeref(o, srcPtr, ty, i * align, ty)
+  stmts.push new Value destPtr
+  new Value new Parens new Block stmts
+
+# Find the last executed node.
+lastNonCommentOrDecl = (list) ->
+  i = list.length
+  return [list[i], i] while i-- when list[i] not instanceof Comment and
+                                     list[i] not instanceof TypeAssign and
+                                     list[i] not instanceof DeclareType
+  null
+
+
+# Many of the algorithms we do here are more naturally expressed as folds.
+# Also, instead of passing in a function, pass in a prop to be called on each
+# child, which pushes the typecase into the VM.
+Base::foldChildren = (r, m, o) ->
+  return r unless @children
+  if o.immediate
+    for attr in @children when @[attr]
+      for child in flatten [@[attr]]
+        r = if typeof child[m] is 'function' then child[m](r, o) else r
+  else
+    for attr in @children when @[attr]
+      for child in flatten [@[attr]]
+        r = child.foldChildren r, m, o
+  if typeof @[m] is 'function' then @[m](r, o) else r
+
+Code::foldChildren = (r, m, o) ->
+  return r unless o.crossScope
+  super r, m, o
+
+# Gather return expressions.
+collectReturns = (body) ->
+  exprs = body.expressions
+  body.foldChildren [], 'collectReturn', {}
+
+undefExpr = new Value new Literal 'undefined'
+
+Return::collectReturn = (exprs, o) ->
+  exprs.push this
+  exprs
+
+#### Build Typed Scope
 
 # A box used to record a local variable's type and other metadata.
 class Binding
@@ -128,28 +215,79 @@ Scope::binding = (name, immediate) ->
   return found if found or immediate
   @parent?.binding name
 
-# Many of the algorithms we do here are more naturally expressed as folds.
-# Also, instead of passing in a function, pass in a prop to be called on each
-# child, which pushes the typecase into the VM.
-Base::foldChildren = (r, pre, post, o) ->
-  r = if typeof @[pre] is 'function' then @[pre](r, o) else r
-  return r unless @children
+# Add parameter and return types to the typed scope.
+newTypedScope = (p, e, m) ->
+  scope = new Scope p, e, m
+  scope.variables.length = 0
+  scope.frameSize = 0
+  scope
 
-  if o.immediate
-    for attr in @children when @[attr]
-      for child in flatten [@[attr]]
-        r = if typeof child[pre] is 'function' then child[pre](r, o) else r
-        r = if post and typeof child[post] is 'function' then child[post](r, o) else r
-  else
-    for attr in @children when @[attr]
-      for child in flatten [@[attr]]
-        r = child.foldChildren r, pre, post, o
+# Declaring a type associates a type with the variable in the current
+# scope.
+declare = (scope, v, ty, variables) ->
+  if v instanceof Value
+    error v, "cannot type properties" if v.hasProperties()
+    v = v.base
+  if v instanceof Literal
+    return unless ty
+    if ty instanceof TypeArr or ty instanceof TypeObj
+      error v, "cannot type non-destructuring variable `#{v.value}' with destructuring type `#{ty}'"
+    name = v.value
+    error v, "cannot redeclare variable `#{name}'" if scope.check name
+    bind = new Binding ty
+    scope.add name, bind
+    variables?.push { name, type: ty, binding: bind }
+    putOnStack scope, name if ty instanceof StructType
+    return
+  if v instanceof Arr
+    els = v.objects
+    unless ty instanceof TypeArr
+      error v, "cannot type destructuring array with non-destructuring array type `#{ty}'"
+    for el, i in els
+      if el.this
+        error v, "cannot type @-names"
+      else
+        declare scope, el.base, ty.elements[i], variables
+    return
+  if v instanceof Obj
+    objs = v.objects
+    unless ty instanceof TypeObj
+      error v, "cannot type destructuring object with non-destructuring object type `#{ty}'"
+    for obj in objs
+      if obj instanceof Assign
+        name = obj.variable.base
+        declare scope, obj.value, ty.names[name.value]?.type, variables
+      else if obj.this
+        error v, "cannot type @-names"
+      else
+        name = obj.base
+        declare scope, name, ty.names[name.value]?.type, variables
+    return
+  error v, "trying to type non-typeable"
 
-  if post and typeof @[post] is 'function' then @[post](r, o) else r
+# Put a variable on the stack and increment the frame size.
+putOnStack = (scope, name) ->
+  bind = scope.binding name, true
+  bind.onStack = true
+  bind.spOffset = alignOffset scope.frameSize, bind.type
+  scope.frameSize = bind.spOffset + bind.type.size
+  return
 
-Code::foldChildren = (r, pre, post, o) ->
-  return r unless o.crossScope
-  super(r, pre, post, (extend {}, o))
+DeclareType::declareType = (scope, o) ->
+  declare scope, v, @type.lint(o.types), @variables for v in @typeables
+  scope
+
+Param::declareType = (scope, o) ->
+  # Lint just in case the user manually declared the parameter types and
+  # thus the types were not linted before this point.
+  declare scope, @name, @type?.lint(o.types), (@variables = [])
+  scope
+
+Op::putOnStack = (scope, o) ->
+  if @operator is '&' and (inner = @first.unwrapAll()) instanceof Literal
+    name = inner.value
+    putOnStack scope, name if scope.check name, true
+  scope
 
 # Collect type synonyms.
 TypeAssign::collectType = (types) ->
@@ -194,8 +332,7 @@ PointerType::lint = (types) ->
     error this, "cannot take pointers of unsized type `#{base}'"
   this
 
-PointerType::coerce = (expr) ->
-  ty = expr.unwrapAll().computedType
+PointerType::coerce = (expr, ty) ->
   return expr unless ty instanceof PointerType and ty isnt this
   normalizePtr expr, ty.baseAlignment(), this.baseAlignment()
 
@@ -299,7 +436,11 @@ ArrowType::lint = (types) ->
     params[i] = ty.lint types
   this
 
-#### Type Checking
+#### Type Checking and Transformation
+
+# Cast a node as a particular type.
+cast = (node, ty) ->
+  new Cast node, ty, true
 
 # Unify two types, if possible, into a single type. If `assign` is true, then
 # this behaves asymmetrically for pointer types and automatic promotions of
@@ -335,6 +476,21 @@ unify = (types, lty, rty, assigning) ->
   if lty in integral and rty instanceof PointerType
     printWarn "conversion from pointer to `#{lty}' without cast"
     return lty
+  # Destructurings.
+  if lty instanceof TypeObj and rty instanceof TypeObj
+    return unless lty.fields.length is rty.fields.length
+    fields = []
+    for { name, type: lfty } in lty.fields
+      return unless fty = unify types, lfty, rty.names[name]?.type, assigning
+      fields.push new TypeObjField name, fty
+    return new TypeObj fields
+  if lty instanceof TypeArr and rty instanceof TypeArr
+    return unless lty.elements.length is rty.elements.length
+    elements = []
+    for ty, i in lty.elements
+      return unless ety = unify types, ty, rty.elements[i], assigning
+      elements.push ety
+    return new TypeArr elements
   # Primitive types follow C-like promotion rules.
   if lty in numeric and rty in numeric
     # If we're assigning, return the left type, else return the wider primitive.
@@ -348,193 +504,315 @@ unify = (types, lty, rty, assigning) ->
       return lty
   null
 
-# Is this **Op** a dereference?
-Op::isAssignable = Op::isDeref = -> not @second and @operator is '*'
+Base::typeTransform = (o) ->
+  @typeTransformNode (extend {}, o)
 
-# A block gets the type of its tail expression.
-Block::computeType = (r, o) ->
-  # A block of only one item will be taken care of by unwrapAll.
-  exprs = @expressions
-  return unless exprs.length > 1
-  return @computedType if @typeCached
-  @typeCached = true
-  @computedType = exprs[exprs.length - 1].unwrapAll().computedType
-
-# An if gets the unified type of both of its branches.
-If::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  thenTy = @body?.unwrapAll().computedType
-  elseTy = @elseBody?.unwrapAll().computedType
-  @computedType = ty = unify o.types, thenTy, elseTy
-  if (thenTy or elseTy) and not ty
-    printWarn "branches of if have different types: `#{tystr(thenTy)}' and `#{tystr(elseTy)}'"
-
-# A switch gets the unified type of all its cases.
-Switch::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  types = o.types
-  caseTys = []
-  someCaseJumps = false
-  someCaseTyped = false
-  for [conds, block], i in @cases
-    if block.jumps()
-      ty = null
-      someCaseJumps = true
+typeTransformArray = (o, a) ->
+  for el, i in a
+    if el instanceof Array and el.length
+      typeTransformArray el
     else
-      ty = block.unwrapAll().computedType
-    caseTys.push ty
-    someCaseTyped = true if ty
-    if i is 0
-      cty = ty
-    else
-      cty = unify types, ty, cty
-  cty = unify types, @otherwise.unwrapAll().computedType, cty if @otherwise
-  if someCaseTyped and not cty
-    if someCaseJumps
-      printWarn "cannot type switch with jumps"
-    else
-      printWarn "branches of switch have different types: `#{(tystr(ty) for ty in caseTys).join('\', `')}'"
-  @computedType = cty
+      a[i] = el.typeTransform o
 
-# Casting coerces the expression to a certain type.
-Cast::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  @computedType = @type.lint o.types
+Base::typeTransformNode = (o) ->
+  for attr in @children when child = @[attr]
+    if child instanceof Array and child.length
+      typeTransformArray o, child
+    else
+      @[attr] = child.typeTransform o
+  this
 
-# Assignments do asymmetric type unification.
-assign = (o, lval, rval, context) ->
-  if lval instanceof Value
-    if lval.isArray()
-      lval = lval.base
-      rval = if rval.isArray() then rval.base else null
-    else if lval.isObject()
-      lval = lval.base
-      rval = if rval.isObject() then rval.base else null
-    else if lval.this
-      return
-    lval = lval.unwrapAll()
-  if lval instanceof Literal and lty = lval.computedType
-    # As a convenience if the left-hand side is a pointer and the right-hand
-    # side is 0, replace the right-hand side with null, which has the type *any
-    # to suppress int-to-pointer warnings.
-    if rval?
-      value = rval.unwrapAll()
-      if lty instanceof PointerType and value instanceof Literal and value.value is '0'
-        value.computedType = anyPtrTy
-      # `context` can only be passed in from `Assign::computeType'. This is okay
-      # since compound assignments only have **SimpleAssignable**s as lvals.
-      rty = if context
-        op = context.substr 0, context.indexOf '='
-        binopType o, op, lty, value.computedType, lval
+Literal::typeTransformNode = (o) ->
+  if o.isValue
+    # Only literals that are values should get types. We don't want to
+    # transform properties. Simple identifiers and integer literals may be
+    # typed.
+    val = @value
+    if val is 'null' or (val is '0' and o.wantsToBePointer)
+      # This matters for TI: `null` will cause the typeset of pointers to be
+      # dimorphic.
+      @value = '0'
+      cast this, anyPtrTy
+    else if @isAssignable() and bind = o.scope.binding val
+      ty = bind.type
+      if bind.onStack
+        offset = stackOffsetExpr o, bind.spOffset, ty
+        unless o.scope.check val, true
+          error this, "cannot close over non-local on-stack variable `#{name}'"
+        if ty instanceof StructType
+          cast offset, ty
+        else
+          cast new Value(ty.view, [new Index offset]), ty
       else
-        value.computedType
+        cast this, ty
+    else if @isSimpleNumber()
+      i = parseInt val
+      ty = if (i | 0) is i then i32ty else if (i >>> 0) is i then u32ty else f64ty
+      cast this, ty
+    else if not isNaN Number val
+      cast this, f64ty
     else
-      rty = null
-    unless unify o.types, lty, rty, true
-      msg = "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
-      if context
-        error lval, msg + " using #{context}"
-      else
-        error lval, msg
-  else if lval instanceof Arr
-    robjects = rval?.objects
-    assign o, lel, robjects?[i] for lel, i in lval.objects
-  else if lval instanceof Obj
-    # Build property-name mapping.
-    props = {}
-    if rval?
-      for prop in rval.properties
-        prop = prop.variable if prop.isComplex()
-        if prop?
-          propName = prop.unwrapAll().value.toString()
-          props[propName] = prop
-    for obj in lval.objects
-      if obj instanceof Assign
-        assign o, obj.value, props[obj.variable.unwrapAll().value]
-      else if obj instanceof Value
-        assign o, obj.base, props[obj.base.unwrapAll().value]
+      this
+  else
+    this
 
-Assign::computeType = (r, o) ->
-  if @context is 'object'
-    delete @variable.computedType
-    return
-  return @computedType if @typeCached
-  @typeCached = true
-  assign o, (variable = @variable), @value, @context
-  # Complex left-hand sides (destructuring assignments) always have dynamic type.
-  @computedType = variable.computedType unless variable.isComplex()
+# Only constant indices may be typed.
+Index::isConstant = ->
+  idx = @index.unwrapValue()
+  return idx instanceof Value and (idx.isString() or idx.isSimpleNumber())
 
-# Accesses on struct types may be typed. If we arrived at this case it's
-# because `unwrapAll()` didn't manage to unwrap value, i.e. this is a properties
-# access.
-Value::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  inner = @base.unwrapAll()
-  # Only literals that are values should get types. We don't want to transform
-  # properties. Simple identifiers and integer literals may be typed.
-  if inner instanceof Literal
-    val = inner.value
-    inner.computedType = if val is 'null'
-      anyPtrTy
-    else if inner.isAssignable()
-      (@computedBinding = o.scope.binding val)?.type
-    else if inner.isSimpleNumber()
-      i32ty
-    else if not isNaN number val
-      f64ty
-  if baseTy = inner.computedType
-    for prop in @properties
-      baseTy = baseTy.base if baseTy instanceof PointerType
-      return unless baseTy instanceof StructType
-      error this, "cannot soak struct field names" if prop.soak
+# Similar from `Value::cacheReference`, except that it uses
+# **FreshLiteral**. We can't ever get a complex `name` and still be typed, so we
+# remove that case.
+Value::cacheTransformReference = (ty) ->
+  name = last @properties
+  if @properties.length < 2 and not @base.isComplex() and not name?.isComplex()
+    casted = cast this, ty
+    return [casted, casted]  # `a` `a.b`
+  base = new Value @base, @properties[...-1]
+  if base.isComplex()  # `a().b`
+    bref = new Value new FreshLiteral 'base'
+    base = new Value new Parens new Assign bref, base
+  return [cast(base, ty), cast(bref, ty)] unless name  # `a()`
+  [cast(base.add(name), ty), cast(new Value(bref or base.base, [name]), ty)]
+
+# Values are typed if they're declared to be typed, a literal of one of the
+# primitive types, or a property access on a typed property. The latter can
+# only happen on property accesses of object and array literals where the
+# constituents are typed.
+Value::typeTransformNode = (o) ->
+  o.isValue = yes
+  return this unless vty = (v = @base.typeTransform o).type
+  cumulativeOffset = 0
+  for prop, i in @properties
+    vty = vty.base if vty instanceof PointerType
+    if prop instanceof Access
       fieldName = prop.name.unwrapAll().value
-      field = prop.computedField = baseTy.names[fieldName]
-      error this, "unknown struct field name `#{fieldName}'" unless field
-      baseTy = field.type
-    @computedType = baseTy
-
-# Functions may be typed if their parameters are typed and all return
-# expression types are compatible.
-Code::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  @frameSize = o.scope.frameSize
-  # Arriving in this function means that all the parameters typechecked, since
-  # this is called after the body has been processed. So we just need to
-  # collect the return expressions and compatible their types.
-  types = o.types
-  for rexpr, i in returnExpressions @body
-    if i is 0
-      rty = rexpr.unwrapAll().computedType
+    else if prop instanceof Index and prop.isConstant()
+      fieldName = prop.index.unwrapAll().value
     else
-      rty = unify types, rexpr.unwrapAll().computedType, rty
-  @computedType = new ArrowType @paramTypes, rty
+      return this
+    if vty instanceof StructType
+      field = vty.names[fieldName]
+      error this, "unknown struct field name `#{fieldName}'" unless field
+      if (fty = field.type) instanceof StructType
+        cumulativeOffset += field.offset
+      else
+        v = makeDeref o, v, vty, field.offset + cumulativeOffset, fty
+        vty = fty
+        cumulativeOffset = 0
+    else if vty instanceof TypeObj
+      unless vty = vty.names[fieldName]?.type
+        return this
+      v = new Value v, [prop]
+    else if vty instanceof TypeArr
+      unless vty = vty.elements[fieldName]
+        return this
+      v = new Value v, [prop]
+  if cumulativeOffset isnt 0
+    v = offsetExpr v, vty, cumulativeOffset, fty
+  cast new Value(v), vty
 
 # Applications may be typed if the function is typed and the parameter types
 # unify asymmetrically.
-Call::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-  return unless fty = @variable?.unwrapAll().computedType
+Call::typeTransformNode = (o) ->
+  fty = (@variable = @variable.typeTransform o).type
   error this, "calling a non-function type `#{fty}'" unless fty instanceof ArrowType
+  types = o.types
   paramTys = fty.params
   args = @args
-  types = o.types
   for pty, i in fty.params
     # If fewer arguments than there are parameters were passed, this will be
     # `undefined` and interpreted as the type `any`.
-    aty = args[i]?.computedType
+    aty = (args[i] = args[i]?.typeTransform o)?.type
     if pty and not unify types, pty, aty, true
       error this, "incompatible types: passing arg `#{tystr(aty)}' to param `#{tystr(pty)}'"
   # If all the arguments checked, the call gets the return type.
-  @computedType = fty.ret
+  cast this, fty.ret
 
-# Allocations, pointer arithmetic, and foldably constant arithmetic
-# expressions may be typed.
+# An object literal may be typed pointwise.
+Obj::typeTransformNode = (o) ->
+  fields = []
+  props = @properties
+  for prop, i in props
+    if prop.isComplex()
+      propName = prop.variable.unwrapAll().value.toString()
+      propVar = prop.variable
+      propValue = prop.value
+    else
+      propName = prop.unwrapAll().value.toString()
+      propVar = prop
+      propValue = prop
+    propTy = (propValue = propValue.typeTransform o).type
+    if propTy
+      props[i] = new Assign propVar, propValue, 'object'
+      fields.push new TypeObjField propName, propTy
+  cast this, (new TypeObj fields if fields.length)
+
+# An array literal may be typed pointwise.
+Arr::typeTransformNode = (o) ->
+  fields = []
+  els = @objects
+  for el, i in els
+    elty = (el[i] = el.typeTransform o).type
+    fields.push elty
+    someTyped = yes if elty
+  cast this, (new TypeArr fields if someTyped)
+
+# An assignment is typed if the left side is typed and the two sides' types
+# unify asymmetrically.
+Assign::typeTransformNode = (o) ->
+  lty = (variable = @variable.typeTransform o).type
+
+  # Find function bindings to match up arrow types.
+  #
+  # This is not a full-fledged type system, so this behavior is just to provide
+  # a convenience. The following
+  #
+  #     f :: (int) -> int
+  #     f =  (x) -> x
+  #
+  # is equivalent to
+  #
+  #     f :: (int) -> int
+  #     f =  (x) :: (int) -> x
+  #
+  # *only* when the binding for f is a *syntactic* function. If not, you would
+  # have to declare the types of arguments manually.
+  if (fn = @value.unwrapAll()) instanceof Code and lty instanceof ArrowType
+    # Remember the parameter and return types on the right-hand side. The
+    # return type is only used to propagate the types further, if it is
+    # another arrow type.
+    fn.paramTypes ?= lty.params
+    fn.returnType ?= lty.ret
+
+  o.wantsToBePointer = lty instanceof PointerType and not context
+  rty = (value = @value.typeTransform o).type
+  unless lty
+    @variable = variable
+    @value = value
+    return this
+
+  # Desugar compound assignments, since we need to coerce.
+  if context = @context
+    op = context.substr 0, context.indexOf '='
+    [left, right] = variable.expr.cacheTransformReference variable.type
+    return (new Assign left, new Op(op, right, value)).typeTransform o
+
+  unless ty = unify o.types, lty, rty, true
+    msg = "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
+    if context
+      error variable, msg + " using #{context}"
+    else
+      error variable, msg
+
+  if lty instanceof StructType
+    cast inlineMemcpy(o, variable, value, lty), lty
+  else if lty instanceof TypeObj or lty instanceof TypeArr
+    # Transform destructuring if we're doing some kind of typed thing.
+    ref = new FreshLiteral 'ref', lty
+    assigns = [new Assign new Value(ref), value]
+    pattern = variable.expr
+    isObject = pattern.isObject()
+    for obj, i in pattern.base.objects
+      idx = i
+      if isObject
+        if obj instanceof Assign
+          {variable: {base: idx}, value: obj} = obj
+        else
+          # Everything in this branch is untyped, so they shouldn't have any
+          # casts.
+          if obj.base instanceof Parens
+            [obj, idx] = new Value(obj.unwrapAll()).cacheTransformReference()
+          else
+            idx = if obj.this then obj.properties[0].name else obj
+      if typeof idx is 'number'
+        idx = new Literal idx
+        acc = no
+      else
+        acc = isObject and idx.isAssignable() or no
+      val = new Value ref, [new (if acc then Access else Index) idx]
+      assigns.push (new Assign obj, val, null, param: @param).typeTransform o
+    assigns.push new Value ref
+    cast new Value(new Parens new Block assigns), lty
+  else
+    @variable = variable
+    @value = cast value, lty
+    cast this, lty
+
+# A function may be typed if its parameters are typed and the types of all its
+# return expressions unify.
+Code::typeTransformNode = (o) ->
+  # If the declared return type is an arrow type, recur on all return
+  # positions and propagate.
+  if rty = @returnType instanceof ArrowType
+    for rexpr in returnExpressions @body when rexpr instanceof Code
+      rexpr.paramTypes ?= rty.params
+      rexpr.returnType ?= rty.ret
+  scope = newTypedScope o.scope, @body, this
+  ptys = @paramTypes
+  if ptys
+    if ptys.length isnt @params.length
+      error this, "arrow type has different number of parameters than function"
+    types = o.types
+    for param, i in @params
+      param.type = ptys[i]
+      scope = param.declareType scope, o
+
+  # Hoist all the **DeclareType**s to the top and process them.
+  o.scope = @body.foldChildren @body.foldChildren(scope, 'declareType', o), 'putOnStack', o
+
+  # Convert the last expression to an explicit return.
+  exprs = @body.expressions
+  [implicitReturn, i] = lastNonCommentOrDecl exprs
+  exprs[i] = new Return implicitReturn unless implicitReturn.jumps()
+
+  # Copy parameters that are passed by value and live on the stack.
+  if frameSize = o.scope.frameSize
+    for param in @params
+      for arg in param.variables when arg.binding.onStack
+        plh = new Value new Literal arg.name
+        # The cast is to prevent transforming the right-hand side to a stack
+        # dereference.
+        prh = cast new Value(new Literal arg.name), arg.binding.type
+        exprs.unshift new Assign plh, prh
+    # Do the stack fence.
+    stackFence o, exprs, frameSize if frameSize
+
+  body = @body.typeTransform o
+  body = body.expr if body instanceof Cast
+
+  # Unify the return types and do the stack thing. We should pull the types
+  # directly out since they've been transformed already above.
+  types = o.types
+  for ret, i in rets = collectReturns body
+    rexpr = ret.expression
+    if i is 0
+      rty = rexpr?.type
+    else
+      rty = unify types, rexpr?.type, rty
+
+  unsafeSpRestore = frameSize and opts.unsafe
+  if unsafeSpRestore or rty
+    if unsafeSpRestore
+      restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
+    for ret in rets
+      hasExpr = ret.expression?
+      ret.expression = cast ret.expression, rty if rty and hasExpr
+      if unsafeSpRestore
+        if hasExpr
+          expr = ret.expression
+          tmp = new Value new FreshLiteral 't', expr.type
+          b = [new Assign(tmp, expr), restoreStack, tmp]
+        else
+          b = [restoreStack, undefExpr]
+        ret.expression = new Value new Parens new Block b
+
+  @body = body
+  cast this, new ArrowType(ptys, rty)
+
+# Binary operations may be type depending on the operation. Bitwise operators
+# and comparisons always produce i32.
 ARITH   = [ '+', '-', '*', '/' ]
 BITWISE = [ '<<', '>>', '>>>', '~', '&', '|' ]
 COMPARE = [ '===', '!==', '<', '>', '<=', '>=' ]
@@ -561,408 +839,56 @@ binopType = (o, op, ty1, ty2, node) ->
   else if op in ARITH and ty1 in numeric and ty2 in numeric
     f64ty
 
-Op::computeType = (r, o) ->
-  return @computedType if @typeCached
-  @typeCached = true
-
+Op::typeTransformNode = (o) ->
   op  = @operator
-
   if @isUnary()
-    first = @first.unwrapAll()
-    return @computedType = if op is 'new' and first.value of o.types
-      ty1 = o.types[first.value]
+    if op is 'new' and @first.unwrapAll().value of o.types
+      ty1 = o.types[@first.unwrapAll().value]
       error this, "cannot allocate unsized type `#{ty1}'" unless ty1?.size
       Scope.root.needsMalloc = yes
-      new PointerType ty1
-    else if op is 'delete' and (ty1 = first.computedType)
+      cast new Call(MALLOC, [new Value new Literal ty1.size]), new PointerType ty1
+    else if op is 'delete' and [first, ty1] = @first.typeTransform o and ty1
       error this, 'cannot free non-pointer type' unless ty1 instanceof PointerType
       Scope.root.needsMalloc = yes
-      null
+      cast new Call(FREE, [first]), unit
     else if op is 'sizeof'
       ty1 = @first = @first.lint o.types
       error this, "cannot determine size of type `#{ty1}'" unless ty1.size
-      i32ty
+      cast new Literal(ty1.size), i32ty
     else if op is '&'
-      ty1 = first.computedType
+      ty1 = (first = @first.typeTransform o).type
       error this, "taking reference of an untyped expression `#{@first.compile o}'" unless ty1
       error this, "taking reference of a function type" if ty1 instanceof ArrowType
-      error this, "taking reference of non-assignable" unless first.isAssignable()
-      # Can't take references of upvars.
-      if first instanceof Literal
-        name  = first.value
-        scope = o.scope
-        unless scope.check name, true
-          error this, "taking reference of non-local or undefined variable `#{name}'"
-        putOnStack scope, name
-      new PointerType ty1
-    else if op is '*' and (ty1 = first.computedType)
-      error this, "dereferencing an untyped expression:\n#{@first}" unless ty1
-      error this, "dereferencing a non-pointer type" unless ty1 instanceof PointerType
-      ty1.base
-    else if (op is '++' or op is '--') and ty1 = first.computedType
-      ty1 if ty1 instanceof PointerType or ty1 in integral
-
-  ty1 = @first.unwrapAll().computedType
-  ty2 = @second.unwrapAll().computedType
-
-  # Commute.
-  if ty2 instanceof PointerType
-    tmp = ty1
-    ty1 = ty2
-    ty2 = tmp
-
-  @computedType = binopType o, op, ty1, ty2, this
-
-# Gather return expressions.
-returnExpressions = (body) ->
-  exprs = body.expressions
-  body.foldChildren [exprs[exprs.length - 1]], 'returnExpression', null, {}
-
-undefExpr = new Value new Literal 'undefined'
-
-Return::returnExpression = (exprs, o) ->
-  # @expression could be undefined, which means it's returning null.
-  exprs.push @expression or undefExpr
-  exprs
-
-# Add parameter and return types to the typed scope.
-newTypedScope = (p, e, m) ->
-  scope = new Scope p, e, m
-  scope.variables.length = 0
-  scope.frameSize = 0
-  scope
-
-# Find function bindings to match up arrow types.
-#
-# This is not a full-fledged type system, so this behavior is just to provide
-# a convenience. The following
-#
-#     f :: (int) -> int
-#     f =  (x) -> x
-#
-# is equivalent to
-#
-#     f :: (int) -> int
-#     f =  (x) :: (int) -> x
-#
-# _only_ when the binding for f is a _syntactic_ function. If not, you would
-# have to declare the types of arguments manually.
-Assign::primeComputeType = (r, o) ->
-  if (fn = @value.unwrapAll()) instanceof Code and
-     (name = @variable.unwrapAll()) instanceof Literal and name.isAssignable() and
-     (ty = o.scope.binding(name.value)?.type) instanceof ArrowType
-    # Remember the parameter and return types on the right-hand side. The
-    # return type is only used to propagate the types further, if it is
-    # another arrow type.
-    fn.paramTypes ?= ty.params
-    fn.returnType ?= ty.ret
-  return
-
-# Declare parameter types, and propagate the return type to return expressions
-# if the return type is an arrow type.
-Code::primeComputeType = (r, o) ->
-  # If the declared return type is an arrow type, recur on all return
-  # positions and propagate.
-  rty = @returnType
-  if rty instanceof ArrowType
-    for rexpr in returnExpressions @body when rexpr instanceof Code
-      rexpr = rexpr.unwrapAll()
-      rexpr.paramTypes ?= rty.params
-      rexpr.returnType ?= rty.ret
-  # Make a new scope and declare parameter types.
-  o.scope = newTypedScope o.scope, @body, this
-  ptys = @paramTypes
-  if ptys
-    if ptys.length isnt @params.length
-      error this, "arrow type has different number of parameters than function"
-    types = o.types
-    for param, i in @params
-      param.type = ptys[i]
-      param.declareType r, o
-  # Hoist all the **DeclareType**s to the top and process them. We shouldn't cross
-  # scope here.
-  @body.foldChildren null, 'declareType', null, types: o.types, scope: o.scope
-  return
-
-# Declaring a type associates a type with the variable in the current
-# scope. Destructuring is allowed, but each destructured variable must get a
-# simple type, i.e. not a **TypeArr** or a **TypeObj**.
-declare = (scope, v, ty, variables) ->
-  if v instanceof Literal
-    name = v.value
-    error v, "cannot redeclare typed variable `#{name}'" if scope.check name
-    return unless ty
-    if ty instanceof TypeArr or ty instanceof TypeObj
-      error v, "cannot type non-destructuring variable with destructuring type `#{ty}'"
-    bind = new Binding ty
-    scope.add name, bind
-    variables.push { name, type: ty, binding: bind }
-    putOnStack scope, name if ty instanceof StructType
-    return
-  if v instanceof Value
-    error v, "cannot type properties" if v.hasProperties()
-    v = v.base
-  if v instanceof Arr
-    els = v.objects
-    unless ty instanceof TypeArr
-      error v, "cannot type destructuring array with non-destructuring array type `#{ty}'"
-    for el, i in els
-      if el.this
-        error v, "cannot type @-names"
-      else
-        declare scope, el.base, ty.elements[i], variables
-    return
-  if v instanceof Obj
-    objs = v.objects
-    unless ty instanceof TypeObj
-      error v, "cannot type destructuring object with non-destructuring object type `#{ty}'"
-    for obj in objs
-      if obj instanceof Assign
-        name = obj.variable.base
-        declare scope, obj.value, ty.names[name.value]?.type, variables
-      else if obj.this
-        error v, "cannot type @-names"
-      else
-        name = obj.base
-        declare scope, name, ty.names[name.value]?.type, variables
-    return
-  error v, "trying to type non-typeable"
-
-DeclareType::declareType = (r, o) ->
-  scope = o.scope
-  @variables = variables = []
-  declare scope, v, @type.lint(o.types), variables for v in @typeables
-  return
-
-Param::declareType = (r, o) ->
-  # Lint just in case the user manually declared the parameter types and
-  # thus the types were not linted before this point.
-  scope = o.scope
-  declare scope, this.name, @type?.lint(o.types), (@variables = [])
-  return
-
-#### AST Transformation
-
-# Put a variable on the stack and increment the frame size.
-putOnStack = (scope, name) ->
-  bind = scope.binding name, true
-  bind.onStack = true
-  bind.spOffset = alignOffset scope.frameSize, bind.type
-  scope.frameSize = bind.spOffset + bind.type.size
-  return
-
-# Dereference something in a heap view.
-makeDeref = (o, base, baseTy, offset, offsetTy) ->
-  new Value offsetTy.view(o), [new Index offsetExpr base, baseTy, offset, offsetTy]
-
-# Generate an inline memcpy.
-inlineMemcpy = (o, dest, src, ty) ->
-  scope = o.scope
-  stmts = []
-  # Store the pointer to the struct we're copying to.
-  destPtr = new Value freshVariable 'dest'
-  destPtr.computedType = destPtr.base.computedType = ty
-  stmts.push new Assign destPtr, dest
-  # Store the pointer to the struct we're copying from.
-  srcPtr = new Value freshVariable 'src'
-  srcPtr.computedType = srcPtr.base.computedType = ty
-  stmts.push new Assign new Value(srcPtr), src
-  # Unroll the copy loop over the bytes.
-  align = ty.view.BYTES_PER_ELEMENT
-  for i in [0...alignmentUnits ty]
-    stmts.push new Assign makeDeref(o, destPtr, ty, i * align, ty),
-                          makeDeref(o, srcPtr, ty, i * align, ty)
-  stmts.push new Value destPtr
-  new Value new Parens new Block stmts
-
-# Reflect a heap-allocated struct as a JavaScript object literal.
-structLiteral = (v, ty, o) ->
-  ptr = freshVariable 'ptr'
-  propList = []
-  for field in ty.fields
-    fname = field.name
-    # Use transform here to get a struct literal out, since we have to compute
-    # the offset for the field. We have to manually set the types, kind of
-    # gross.
-    access = new Access new Literal fname
-    access.computedField = field
-    propValue = new Value ptr, [access]
-    propValue.computedType = field.type
-    propList.push new Assign new Value(new Literal fname), propValue.transformNode(), 'object'
-  obj = new Value new Obj propList
-  new Value new Parens new Block [new Assign(new Value(ptr), v), obj]
-
-# Transform a function to have the right stack pointer computations upon entry
-# and exit. The safe way is to wrap the entire body of the function in a
-# `try..finally` block to account for possible throws. If the user indicated
-# `gotta-go-fast`, we'll only emit stack pointer computations for explicit
-# returns.
-stackFence = (o, exprs, frameSize, isRoot) ->
-  # The stack uses `U32`, so record it manually.
-  U32(o)
-  # Assign all the on-stack locals to their addresses.
-  scope = o.scope
-  exprs.unshift new Assign SP, normalizePtr(SPREAL, SPREAL.computedType.view.BYTES_PER_ELEMENT,
-                                                    SP.computedType.view.BYTES_PER_ELEMENT)
-  exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
-  restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
-  if opts.unsafe
-    exprs.push restoreStack if isRoot
-  else
-    exprs[0] = new Try new Block(exprs.slice()), null, null, new Block [restoreStack]
-    exprs.length = 1
-  return
-
-# Coerce to a type.
-Cast::transformNode = (o) ->
-  return @computedType.coerce?(@expr) or @expr
-
-# Add `SP` computations and bring in heap views if needed.
-Code::transformNode = (o) ->
-  o.returnType = @computedType?.ret
-  if frameSize = @frameSize
-    # All parameters that need to be stack allocated need to not be emitted as
-    # stack dereferences in the parameter list and we have to copy over the
-    # argument.
-    exprs = @body.expressions
-    for param in @params
-      for arg in param.variables when arg.binding.onStack
-        plh = new Value new Literal arg.name
-        prh = new Value new Literal arg.name
-        plh.computedType = plh.base.computedType = prh.computedType = arg.type
-        plh.computedBinding = arg.binding
-        asn = new Assign plh, prh
-        asn.computedType = arg.type
-        exprs.unshift asn
-    o.frameSize = frameSize
-    stackFence o, exprs, frameSize
-  return
-
-# Add SP computation and pointer conversions to explicit returns.
-Return::transformNode = (o) ->
-  # First transform for pointer conversion.
-  @expression = ty.coerce @expression if (ty = o.returnType)?.coerce?
-  # Then transform for any stack fencing we need to do.
-  return unless (frameSize = o.frameSize) and opts.unsafe
-  restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
-  if expr = @expression
-    tmp = new Value freshVariable 't'
-    body = [new Assign(tmp, expr), restoreStack, tmp]
-    @expression = new Value new Parens new Block body
-    return
-  this.transformNode = null
-  return new Block [restoreStack, this]
-
-# Need to convert pointers when passing them as arguments.
-Call::transformNode = (o) ->
-  return unless fty = @variable?.unwrapAll().computedType
-  paramTys = fty.params
-  args = @args
-  for pty, i in fty.params when pty?.coerce?
-    args[i] = pty.coerce args[i]
-  return
-
-# Transform this Value into a new Value that does offset index lookups on
-# the heap.
-Value::transformNode = (o) ->
-  return unless ty = @computedType
-  base  = @base
-  inner = base.unwrapAll()
-  props = @properties
-  bind  = @computedBinding
-  unless props.length
-    if inner instanceof Literal
-      if bind?.onStack
-        # Treat stack accesses as dereferences, except for structs, which are
-        # kept as offsets. FIXME: it's unclear what raw use of a
-        # stack-allocated struct means right now.
-        offset = stackOffsetExpr bind.spOffset, bind.type
-        if ty instanceof StructType
-          return offset
-        return new Value ty.view(o), [new Index offset]
-      if inner.value is 'null' and ty instanceof PointerType
-        # This matters for TI: null will cause the typeset of pointers to be
-        # dimorphic.
-        inner.value = '0'
-    return
-  # If we're explicitly dereferencing the struct base, treat it like we
-  # weren't.
-  v = if inner.isDeref?() then inner.first else base
-  vty = v.unwrapAll().computedType
-  v = stackOffsetExpr bind.spOffset, bind.type if bind?.onStack
-  cumulativeOffset = 0
-  for prop in props
-    vty = vty.base if vty instanceof PointerType
-    field = prop.computedField
-    if (fty = field.type) instanceof StructType
-      cumulativeOffset += field.offset
-    else
-      v = makeDeref o, v, vty, field.offset + cumulativeOffset, fty
-      vty = fty
-      cumulativeOffset = 0
-  if cumulativeOffset isnt 0
-    offsetExpr v, vty, cumulativeOffset, fty
-  else
-    v
-
-# Do struct copy semantics here since it requires a non-local transformation,
-# i.e. it can't be compiled by transforming the lval and rval individually.
-Assign::transformNode = (o) ->
-  return unless lty = @computedType
-  if lty instanceof StructType
-    lval = @variable.unwrapAll()
-    return inlineMemcpy o, (if lval.isDeref?() then lval.first else @variable), @value, lty
-  if lty instanceof PointerType and @context and (au = alignmentUnits lty.base) isnt 1
-    @value = multExpr @value, au
-  else if lty.coerce?
-    @value = lty.coerce @value
-  return
-
-# Typed new and delete are transformed to malloc and free, and pointer
-# arithmetic also needs to be transformed.
-Op::transformNode = (o) ->
-  return unless @computedType or @first.computedType
-  op = @operator
-  if @isUnary()
-    if op is 'new' and ty1 = @computedType
-      new Call MALLOC, [new Value new Literal ty1.base.size]
-    else if op is 'delete'
-      new Call FREE, [@first]
-    else if op is 'sizeof'
-      new Literal @first.size
-    else if op is '&'
-      if @computedType.base instanceof StructType
-        # If we're taking the pointer of a struct, we don't need to do anything
-        # since structs are kept as pointers.
-        @first
-      else
-        # Otherwise we must be doing a dereference, so transform it now and
-        # get out the index expression, which must be the address.
-        @first.unwrapAll().transformNode(o).properties[0].index
+      error this, "taking reference of non-assignable" unless @first.isAssignable()
+      ty = new PointerType ty1
+      addr = if ty1 instanceof StructType then first else first.expr.properties[0].index
+      cast addr, ty
     else if op is '*'
-      # This is only called when this deref is _not_ the base of a struct
-      # access, as in struct accesses, dereferencing is the same as not
-      # dereferencing, since . is extended to work like -> in C.
-      ty1 = @computedType
-      makeDeref o, @first, ty1, 0, ty1
-    else if (op is '++' or op is '--') and
-            (ty1 = @computedType) instanceof PointerType and
-            (au = alignmentUnits ty1.base) isnt 1
-      # If `p` is type `*T`, p++` desugars to `(p += sizeof T, p - sizeof T)`.
-      size = new Value new Literal au
-      if op is '++'
-        op1 = '+='
-        op2 = '-'
+      ty1 = (first = @first.typeTransform o).type
+      error this, "dereferencing untyped expression" unless ty1
+      error this, "dereferencing a non-pointer type" unless ty1 instanceof PointerType
+      if ty1 = ty1.base instanceof StructType
+        cast first, ty1
       else
-        op1 = '-='
-        op2 = '-'
-      new Value new Parens new Block [new Assign(@first, size, op1),
-                                      new Op(op2, @first, size)]
+        cast makeDeref(o, first, ty1, 0, ty1), ty1
+    else if (op is '++' or op is '--') and
+            (ty1 = (first = @first.typeTransform o).type) and
+            (ty1 instanceof PointerType or ty1 in numeric)
+      [left, right] = first.expr.cacheTransformReference ty1
+      tmp = new Value new FreshLiteral 't', ty1
+      asn = new Assign right, new Value(new Literal '1'), if op is '++' then '+=' else '-='
+      assigns = [new Assign(tmp, left), asn.typeTransform(o), tmp]
+      cast new Value(new Parens new Block assigns), ty1
+    else
+      @first = @first.typeTransform o
+      this
   else
-    # Don't return a new **Op** so we don't have to set transform to null to
-    # prevent unbounded recursion.
-    ty1 = @first.computedType
-    ty2 = @second.computedType
+    ty1 = (@first = @first.typeTransform o).type
+    ty2 = (@second = @second.typeTransform o).type
+    # Commute.
+    pointerSecond = ty2 instanceof PointerType
+    ty = binopType o, op, (if pointerSecond then ty2 else ty1),
+                          (if pointerSecond then ty1 else ty2), this
     if (op is '+' or op is '-') and
        ((ty1 instanceof PointerType and ty2 in integral and
          (au = alignmentUnits ty1.base) isnt 1) or
@@ -975,27 +901,73 @@ Op::transformNode = (o) ->
     else if op in COMPARE and
          ty1 instanceof PointerType and ty2 instanceof PointerType
       # By convention always normalize the second operand.
-      @second = ty1.coerce @second
-    return
+      @second = cast @second, ty1
+    cast this, ty
 
-# Coerce to an integral type.
-coerceIntegral = (width, signed) -> (expr) ->
-  ty = expr.unwrapAll().computedType
-  return expr unless ty isnt this
-  # Do we need to truncate? Bitwise operators automatically truncate to 32
-  # bits in JavaScript so if the width is 32, we don't need to do manual
-  # truncation.
-  if width isnt 32 and ty.size << 3 > width
-    c = new Op '&', expr, new Value new Literal '0x' + ((1 << width) - 1).toString(16)
-    # Do we need to sign extend?
-    if signed
-      shiftBy = new Value new Literal 32 - width
-      c = new Op '>>', new Op('<<', c, shiftBy), shiftBy
-    c
-  else if ty.signed isnt signed
-    new Op (if signed then '|' else '>>>'), expr, new Value new Literal '0'
-  else
-    expr
+# Parenthesized expressions gets the type of the expression.
+Parens::typeTransformNode = (o) ->
+  @body = @body.typeTransformNode o
+  cast this, @body.type
+
+# A block gets the type of its tail expression.
+Block::typeTransformNode = (o) ->
+  return super o unless o.isValue
+  for expr, i in exprs = @expressions
+    exprs[i] = expr.typeTransform o
+    if i is exprs.length - 1
+      unless expr.jumps()
+        ty = exprs[i].type
+        return cast this, ty
+      return this
+
+# A switch gets the unified type of all its cases.
+Switch::computeNodeType = (o) ->
+  return super o unless o.isValue
+  @subject = @subject.typeTransform o
+  types = o.types
+  caseTys = []
+  someCaseJumps = false
+  someCaseTyped = false
+  for c, i in @cases
+    block = c.block
+    if block.jumps()
+      ty = null
+      someCaseJumps = true
+    else
+      ty = (c.block = block.typeTransform o).type
+    caseTys.push ty
+    someCaseTyped = true if ty
+    if i is 0
+      cty = ty
+    else
+      cty = unify types, ty, cty
+  if @otherwise
+    otherwiseTy = (@otherwise = @otherwise.typeTransform o).type
+    cty = unify types, otherwiseTy, cty
+  if someCaseTyped and not cty
+    if someCaseJumps
+      printWarn "cannot type switch with jumps"
+    else
+      printWarn "branches of switch have different types: `#{(tystr(ty) for ty in caseTys).join('\', `')}'"
+  cast this, cty
+
+# An if gets the unified type of both of its branches.
+If::typeTransformNode = (o) ->
+  return super o unless o.isValue
+  @condition = @condition.typeTransform o
+  thenTy = (@body = @body?.typeTransform o)?.type
+  elseTy = (@elseBody = @elseBody?.typeTransform o)?.type
+  ty = unify o.types, thenTy, elseTy
+  if (thenTy or elseTy) and not ty
+    printWarn "branches of if have different types: `#{tystr(thenTy)}' and `#{tystr(elseTy)}'"
+  cast this, ty
+
+# Casting coerces the expression to a certain type during compilation.
+Cast::typeTransformNode = (o) ->
+  unless @generated
+    @type = @type.lint o.types
+    @expr = @expr.typeTransform o
+  this
 
 #### Driver
 
@@ -1009,6 +981,7 @@ class PrimitiveType
 anyPtrTy = new PointerType null
 
 # Builtin primitives.
+unit  = new PrimitiveType 0, 'unit'
 i8ty  = new PrimitiveType 1, 'i8',  I8,  yes, coerceIntegral(8,  yes)
 u8ty  = new PrimitiveType 1, 'u8',  U8,  no,  coerceIntegral(8,  no)
 i16ty = new PrimitiveType 2, 'i16', I16, yes, coerceIntegral(16, yes)
@@ -1021,25 +994,19 @@ f64ty = new PrimitiveType 8, 'double', F64, yes
 integral = [ i8ty, u8ty, i16ty, u16ty, i32ty, u32ty ]
 numeric  = integral.concat [ f64ty ]
 
-# The local stack pointer is a `u32`.
-SP.computedType = u32ty
-# The actual stack pointer is a `u8`.
-SPREAL.computedType = u8ty
-SPREAL.transformNode = null
-
 requireExpr = (name) ->
   new Call new Value(new Literal 'require'), [new Value new Literal "'#{name}'"]
 
-exports.analyzeTypes = (root, o) ->
+exports.analyzeTypes = (root, o = {}) ->
   usesTypes = no
   root.traverseChildren yes, (node) ->
-    if (node instanceof DeclareType) or
+    if (node instanceof DeclareType) or (node instanceof TypeAssign) or
        (node instanceof Op and node.isUnary() and
         (node.operator is '&' or node.operator is '*')) or
        (node instanceof Code and node.paramTypes)
       usesTypes = yes
       return no
-  return unless usesTypes
+  return root unless usesTypes
 
   # Global options.
   opts.warn   = o.warn
@@ -1063,26 +1030,33 @@ exports.analyzeTypes = (root, o) ->
     double: f64ty
     num:    f64ty
 
-  types = root.foldChildren initialTypes, 'collectType', null, immediate: true
+  # Collect all type synonyms.
+  types = root.foldChildren initialTypes, 'collectType', immediate: true
   types[name] = ty.lint types for name, ty of types when ty
 
+  # Build the type scope.
+  o = { types: types }
   scope = newTypedScope null, root, null
-  options = types: types, scope: scope
-  root.foldChildren null, 'declareType', null, options
-  options.crossScope = true
-  root.foldChildren null, 'primeComputeType', 'computeType', options
-  root.frameSize = scope.frameSize
+  o.scope = root.foldChildren root.foldChildren(scope, 'declareType', o), 'putOnStack', o
+
+  # Do the stack fence for the module.
+  exprs = root.expressions
+  if frameSize = o.scope.frameSize
+    o.frameSize = frameSize
+    stackFence o, exprs, frameSize, yes
+
+  # Do the actual transform
+  root.typeTransform o
+
+  # Bring in `malloc` if this module needs it.
+  if Scope.root.needsMalloc
+    obj = new Value new Obj [MALLOC, FREE]
+    exprs.unshift new Assign obj, requireExpr 'heap/malloc'
+
+  # Add a transform hook that requires the heap module.
   root.transformRoot = (o) ->
     # Require the heap. This has to be done using `o.scope.assign`, to make sure
     # that it comes before the cached views.
     o.scope.assign HEAP.base.value, "require('heap/heap')"
-    # Do the stack fence for the module.
-    exprs = @expressions
-    if frameSize = @frameSize
-      o.frameSize = frameSize
-      stackFence o, exprs, frameSize, yes
-    # Bring in `malloc` if this module needs it.
-    if scope.needsMalloc
-      obj = new Value new Obj [MALLOC, FREE]
-      exprs.unshift new Assign obj, requireExpr 'heap/malloc'
-  types
+
+  root

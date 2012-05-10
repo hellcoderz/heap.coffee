@@ -38,6 +38,7 @@ SWITCHES = [
   ['-j', '--join [FILE]',     'concatenate the source CoffeeScript before compiling']
   ['-l', '--lint',            'pipe the compiled JavaScript through JavaScript Lint']
   ['-n', '--nodes',           'print out the parse tree that the parser produces']
+  ['-m', '--transnodes',      'print out the parse tree after type transformation']
   [      '--nodejs [ARGS]',   'pass options directly to the "node" binary']
   ['-o', '--output [DIR]',    'set the output directory for compiled JavaScript']
   ['-p', '--print',           'print out the compiled JavaScript']
@@ -126,6 +127,9 @@ compileScript = (file, input, base) ->
     CoffeeScript.emit 'compile', task
     if      o.tokens      then printTokens CoffeeScript.tokens t.input
     else if o.nodes       then printLine CoffeeScript.nodes(t.input).toString().trim()
+    else if o.transnodes
+      o2 = { warn: o.warn, unsafe: o['gotta-go-fast'] }
+      printLine CoffeeScript.transnodes(t.input, o2).toString().trim()
     else if o.run         then CoffeeScript.run t.input, t.options
     else if o.join and t.file isnt o.join
       sourceCode[sources.indexOf(t.file)] = t.input

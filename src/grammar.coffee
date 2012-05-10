@@ -222,8 +222,8 @@ grammar =
   ]
 
   AssignTypeObj: [
-    o 'IDENTIFIER : Type',                      -> new TypeObjField $1, $3, 'object'
-    o 'IDENTIFIER : INDENT Type OUTDENT',       -> new TypeObjField $1, $3, 'object'
+    o 'IDENTIFIER : Type',                      -> new TypeObjField $1, $3
+    o 'IDENTIFIER : INDENT Type OUTDENT',       -> new TypeObjField $1, $3
     o 'Comment'
   ]
 

@@ -42,30 +42,9 @@ exports.Base = class Base
     node     = @unfoldSoak(o) or this
     node.tab = o.indent
     if o.level is LEVEL_TOP or not node.isStatement(o)
-      node.transform(o).compileNode o
+      node.compileNode o
     else
       node.compileClosure o
-
-  transform: (o) ->
-    # Before we compile, do we need to transform any of its children?
-    for attr in @children when child = @[attr]
-      if child instanceof Array
-        @transformArray child, o if child.length
-      else if trans = child.transformNode?(o)
-        @[attr] = trans
-      else
-        # Transform unwraps eagerly because the compiler sometimes unwraps and
-        # compiles instead of normally compiling the wrapper.
-        node = child
-        node.transform o until node is node = node.unwrap()
-    this
-
-  transformArray: (arr, o) ->
-    for el, i in arr
-      if el instanceof Array
-        @transformArray el, o
-      else if trans = el.transformNode?(o)
-        arr[i] = trans
 
   # Statements converted into expressions via closure-wrapping share a scope
   # object with their parent closure, to preserve the expected lexical scope.
@@ -73,7 +52,7 @@ exports.Base = class Base
     if @jumps()
       throw SyntaxError 'cannot use a pure statement in an expression.'
     o.sharedScope = yes
-    Closure.wrap(this).transform(o).compileNode o
+    Closure.wrap(this).compileNode o
 
   # If the code generation wishes to use the result of a complex expression
   # in multiple places, ensure that the expression is only ever evaluated once,
@@ -154,6 +133,11 @@ exports.Base = class Base
   unwrapAll: ->
     node = this
     continue until node is node = node.unwrap()
+    node
+
+  unwrapValue: ->
+    node = this
+    continue until node instanceof Value or node is node = node.unwrap()
     node
 
   # Default implementations of the common node properties and methods. Nodes
@@ -245,7 +229,7 @@ exports.Block = class Block extends Base
         # This is a nested block.  We don't do anything special here like enclose
         # it in a new scope; we just compile the statements in this block along with
         # our own
-        codes.push node.transform(o).compileNode o
+        codes.push node.compileNode o
       else if top
         node.front = true
         code = node.compile o
@@ -280,7 +264,7 @@ exports.Block = class Block extends Base
         exp
       rest = @expressions[preludeExps.length...]
       @expressions = preludeExps
-      prelude = "#{@transform(o).compileNode merge(o, indent: '')}\n" if preludeExps.length
+      prelude = "#{@compileNode merge(o, indent: '')}\n" if preludeExps.length
       @expressions = rest
     code = @compileWithDeclarations o
     return code if o.bare
@@ -297,9 +281,9 @@ exports.Block = class Block extends Base
     if i
       rest = @expressions.splice i, 9e9
       [spaced, @spaced] = [@spaced, no]
-      [code  , @spaced] = [(@transform(o).compileNode o), spaced]
+      [code  , @spaced] = [(@compileNode o), spaced]
       @expressions = rest
-    post = @transform(o).compileNode o
+    post = @compileNode o
     {scope} = o
     if scope.expressions is this
       declars = o.scope.hasDeclarations()
@@ -443,7 +427,6 @@ exports.TypeAssign = class TypeAssign extends Base
     @type = type
     @name = name
 
-  children: ['type']
   isStatement: YES
 
   compile: (o, level) ->
@@ -454,6 +437,8 @@ exports.TypeAssign = class TypeAssign extends Base
 
 exports.DeclareType = class DeclareType extends Base
   constructor: (@typeables, @type) ->
+    # Filled in during type checking.
+    @variables = []
 
   children: ['typeables']
   isStatement: YES
@@ -470,22 +455,33 @@ exports.DeclareType = class DeclareType extends Base
         throw TypeError "type for `#{name}' not declared in the same scope"
       scope.find name
       code += '\n' if i isnt 0
-      code += "#{o.indent}// #{name} :: #{tystr(ty)}"
+      code += "#{o.indent}// #{name} :: #{tystr(ty, 1)}"
     code
 
-  toString: (idt = '') ->
-    '\n' + idt + @constructor.name + @typeables + '\n' + idt + TAB + @type
-
 exports.Cast = class Cast extends Base
-  constructor: (@expr, @type) ->
+  constructor: (expr, type, @generated = false) ->
+    return expr unless type
+    return expr if expr instanceof Cast and expr.type is type
+    @lineno = expr.unwrapAll().lineno
+    @expr = expr
+    @type = type
 
-  children: ['expr', 'type']
+  children: ['expr']
 
-  compileNode: (o) ->
-    @expr.compile o
+  isStatement  : -> @expr.isStatement()
+  jumps        : -> @expr.jumps()
+  isEmpty      : -> @expr.isEmpty()
+  isComplex    : -> @expr.isComplex()
+  isChainable  : -> @expr.isChainable()
+  isAssignable : -> @expr.isAssignable()
+  hasProperties: -> @expr.hasProperties?()
 
-  toString: (idt = '') ->
-    '\n' + idt + @constructor.name + @expr + '\n' + idt + TAB + @type
+  compile: (o, lvl) ->
+    type = @type
+    expr = @expr
+    if expr.type and type.coerce?
+      @expr = type.coerce expr, expr.type
+    @expr.compile o, lvl
 
 #### Return
 
@@ -880,7 +876,7 @@ exports.Range = class Range extends Base
     pre    = "\n#{idt}#{result} = [];"
     if @fromNum and @toNum
       o.index = i
-      body    = @transform(o).compileNode o
+      body    = @compileNode o
     else
       vars    = "#{i} = #{@fromC}" + if @toC isnt @toVar then ", #{@toC}" else ''
       cond    = "#{@fromVar} <= #{@toVar}"
@@ -1316,8 +1312,7 @@ exports.Code = class Code extends Base
   # a closure.
   compileNode: (o) ->
     o.scope         = new Scope o.scope, @body, this
-    unless o.scope.shared = del(o, 'sharedScope')
-      o.frameSize   = @frameSize
+    o.scope.shared  = del(o, 'sharedScope')
     o.indent        += TAB
     delete o.bare
     delete o.isExistentialEquals
