@@ -483,6 +483,11 @@ exports.Cast = class Cast extends Base
       @expr = type.coerce expr, expr.type
     @expr.compile o, lvl
 
+  unwrapCast: () ->
+    node = this
+    continue until node is (node = if node instanceof Cast then node.expr else node.unwrap())
+    node
+
 #### Return
 
 # A `return` is a *pureStatement* -- wrapping it in a closure wouldn't

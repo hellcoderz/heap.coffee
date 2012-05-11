@@ -334,6 +334,7 @@ PointerType::lint = (types) ->
 
 PointerType::coerce = (expr, ty) ->
   return expr unless ty instanceof PointerType and ty isnt this
+  return expr if expr.unwrapCast?().value is '0'
   normalizePtr expr, ty.baseAlignment(), this.baseAlignment()
 
 TypeArr::lint = (types) ->
@@ -562,11 +563,11 @@ Index::isConstant = ->
   return idx instanceof Value and (idx.isString() or idx.isSimpleNumber())
 
 # Similar from `Value::cacheReference`, except that it uses
-# **FreshLiteral**. We can't ever get a complex `name` and still be typed, so we
-# remove that case.
+# **FreshLiteral**. We can't ever get a complex `name` that isn't pointer
+# arithmetic and still be typed, so we remove that case.
 Value::cacheTransformReference = (ty) ->
   name = last @properties
-  if @properties.length < 2 and not @base.isComplex() and not name?.isComplex()
+  if @properties.length < 2 and not @base.isComplex()
     casted = cast this, ty
     return [casted, casted]  # `a` `a.b`
   base = new Value @base, @properties[...-1]
@@ -693,11 +694,18 @@ Assign::typeTransformNode = (o) ->
     @value = value
     return this
 
+  # Are we assigning into a view?
+  autoCoerce = variable.unwrapCast().base instanceof ViewLiteral
+
   # Desugar compound assignments, since we need to coerce.
   if context = @context
     op = context.substr 0, context.indexOf '='
     [left, right] = variable.expr.cacheTransformReference variable.type
-    return (new Assign left, new Op(op, right, value)).typeTransform o
+    # Only expand compound assignment if we're not assigning into a view and
+    # we don't need to cache reference to preserve semantics.
+    unless autoCoerce and left.expr is variable.expr
+      return (new Assign left, new Op(op, right, value)).typeTransform o
+    rty = binopType o, op, lty, rty
 
   unless ty = unify o.types, lty, rty, true
     msg = "incompatible types: assigning `#{tystr(rty)}' to `#{lty}'"
@@ -737,7 +745,13 @@ Assign::typeTransformNode = (o) ->
     cast new Value(new Parens new Block assigns), lty
   else
     @variable = variable
-    @value = cast value, lty
+    if autoCoerce
+      if context and lty instanceof PointerType and (au = alignmentUnits lty.base) isnt 1
+        @value = cast multExpr(value, au), lty
+      else
+        @value = value
+    else
+      @value = cast value, lty
     cast this, lty
 
 # A function may be typed if its parameters are typed and the types of all its
