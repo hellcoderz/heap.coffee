@@ -77,8 +77,7 @@ exports.Base = class Base
   # Note that this is overridden for smarter behavior for
   # many statement nodes (e.g. If, For)...
   makeReturn: (res) ->
-    me = this
-    continue until me instanceof Value or me is me = me.unwrap()
+    me = @unwrapAll()
     if res
       new Call new Literal("#{res}.push"), [me]
     else
@@ -252,11 +251,11 @@ exports.Block = class Block extends Base
   # It would be better not to generate them in the first place, but for now,
   # clean up obvious double-parentheses.
   compileRoot: (o) ->
-    o.indent    = if o.bare then '' else TAB
-    o.scope     = new Scope null, this, null
-    o.level     = LEVEL_TOP
-    @spaced     = yes
-    prelude     = ""
+    o.indent  = if o.bare then '' else TAB
+    o.scope   = new Scope null, this, null
+    o.level   = LEVEL_TOP
+    @spaced   = yes
+    prelude   = ""
     @transformRoot?(o)
     unless o.bare
       preludeExps = for exp, i in @expressions
