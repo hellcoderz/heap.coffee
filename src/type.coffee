@@ -618,10 +618,14 @@ Value::typeTransformNode = (o) ->
 # unify asymmetrically.
 Call::typeTransformNode = (o) ->
   fty = (@variable = @variable.typeTransform o).type
-  error this, "calling a non-function type `#{fty}'" unless fty instanceof ArrowType
+  args = @args
+  unless fty
+    args[i] = arg.typeTransform o for arg, i in args
+    return this
+  unless fty instanceof ArrowType
+    error this, "calling a non-function type `#{fty}'"
   types = o.types
   paramTys = fty.params
-  args = @args
   for pty, i in fty.params
     # If fewer arguments than there are parameters were passed, this will be
     # `undefined` and interpreted as the type `any`.
