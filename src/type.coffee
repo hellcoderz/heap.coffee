@@ -881,7 +881,7 @@ Op::typeTransformNode = (o) ->
       ty1 = (first = @first.typeTransform o).type
       error this, "dereferencing untyped expression" unless ty1
       error this, "dereferencing a non-pointer type" unless ty1 instanceof PointerType
-      if ty1 = ty1.base instanceof StructType
+      if (ty1 = ty1.base) instanceof StructType
         cast first, ty1
       else
         cast makeDeref(o, first, ty1, 0, ty1), ty1
