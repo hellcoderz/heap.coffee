@@ -18,6 +18,7 @@ exports.Scope = class Scope
   # where it should declare its variables, and a reference to the function that
   # it wraps.
   constructor: (@parent, @expressions, @method) ->
+    @nassigned = 0
     @variables = [{name: 'arguments', type: 'arguments'}]
     @positions = {}
     Scope.root = this unless @parent
@@ -73,7 +74,7 @@ exports.Scope = class Scope
   # Ensure that an assignment is made at the top of this scope
   # (or at the top-level scope, if requested).
   assign: (name, value) ->
-    @add name, {value, assigned: yes}, yes
+    @add name, {value, assigned: yes, order: @nassigned++}, yes
     @hasAssignments = yes
 
   # Does this scope have any declared variables?
@@ -91,4 +92,6 @@ exports.Scope = class Scope
   # Return the list of assignments that are supposed to be made at the top
   # of this scope.
   assignedVariables: ->
-    "#{v.name} = #{v.type.value}" for v in @variables when v.type.assigned
+    assigns = @variables.filter((v) -> v.type.assigned)
+                        .sort((v1, v2) -> v1.type.order > v2.type.order)
+    "#{v.name} = #{v.type.value}" for v in assigns

@@ -18,40 +18,6 @@ error = (node, msg) ->
 
 #### Constants and Utilities
 
-# The heap module that holds all the views.
-HEAP    = new Value new Literal '_HEAP'
-
-# Views.
-class ViewLiteral extends Literal
-  constructor: (@value, @BYTES_PER_ELEMENT) ->
-
-  compileNode: (o) ->
-    name = @value
-    o.scope.assign name, "#{HEAP.base.value}.#{name.substr name.lastIndexOf('_') + 1}"
-    super o
-
-I8     = new ViewLiteral '_I8',  1
-U8     = new ViewLiteral '_U8',  1
-I16    = new ViewLiteral '_I16', 2
-U16    = new ViewLiteral '_U16', 2
-I32    = new ViewLiteral '_I32', 4
-U32    = new ViewLiteral '_U32', 4
-F32    = new ViewLiteral '_F32', 4
-F64    = new ViewLiteral '_F64', 8
-
-# The cached stack pointer.
-SP      = new Value new Literal '_SP'
-# The actual stack pointer.
-SPREAL  = new Value U32, [new Index new Value new Literal 1]
-# Memory operations.
-MALLOC  = new Value new Literal 'malloc'
-FREE    = new Value new Literal 'free'
-MEMCPY  = new Value new Literal 'memcpy'
-
-# Global option for if we should print warnings.
-opts = { warn: false, unsafe: false }
-printWarn = (line) -> process.stderr.write 'warning: ' + line + '\n' if opts.warn
-
 # Ensure that a variable is fresh by getting a fresh name just-in-time.
 class FreshLiteral extends Literal
   constructor: (@value, @type) ->
@@ -59,10 +25,72 @@ class FreshLiteral extends Literal
   compileNode: (o) ->
     @value = o.scope.freeVariable @value
     @compileNode = Literal::compileNode
-    super o
+    @value
 
   typeTransformNode: (o) ->
     this
+
+# The heap module that holds all the views.
+HEAP    = new Value new FreshLiteral 'HEAP'
+
+# Views.
+class ViewLiteral extends Literal
+  constructor: (@value, @BYTES_PER_ELEMENT) ->
+
+  compileNode: (o) ->
+    # These ensure freshness differently because these really are globals --
+    # we're caching them for speed. Also, we need the original value after
+    # ensuring freshness.
+    scope = o.scope
+    unless scope.freshView?[@value]
+      scope.freshView ?= {}
+      name = scope.freshView[@value] = o.scope.freeVariable @value
+      scope.assign name, "#{HEAP.compile o}.#{@value}"
+    scope.freshView[@value]
+
+I8     = new ViewLiteral 'I8',  1
+U8     = new ViewLiteral 'U8',  1
+I16    = new ViewLiteral 'I16', 2
+U16    = new ViewLiteral 'U16', 2
+I32    = new ViewLiteral 'I32', 4
+U32    = new ViewLiteral 'U32', 4
+F32    = new ViewLiteral 'F32', 4
+F64    = new ViewLiteral 'F64', 8
+
+# The actual stack pointer.
+SPREAL  = new Value U32, [new Index new Value new Literal 1]
+
+# The cached stack pointer.
+SP      = ->
+  sp = new Value new Literal 'SP'
+  sp.fixup = (frameSize) ->
+    asn = new Assign SPREAL, new Value(new Literal frameSize), '-='
+    @base.SPREAL = new Value new Parens new Block [asn]
+  sp.base.SPREAL = SPREAL
+  sp.base.compileNode = (o) ->
+    scope = o.scope
+    @value = scope.freeVariable @value
+    spreal = normalizePtr @SPREAL, U8.BYTES_PER_ELEMENT, I32.BYTES_PER_ELEMENT
+    scope.assign name, spreal.compile o
+    delete @compileNode
+    @value
+  sp
+
+# The frame pointer. It's fixed up after we find out how large the frame is.
+FP      = ->
+  fp = new Value new Literal 'FP'
+  fp.fixup = (o, frameSize) ->
+    @base = new Parens new Block [new Op '+', o.SP, new Value new Literal frameSize >> 2]
+  fp
+
+# Memory operations.
+MALLOC  = new Value new FreshLiteral 'malloc'
+FREE    = new Value new FreshLiteral 'free'
+MEMCPY  = new Value new FreshLiteral 'memcpy'
+
+# Global option for if we should print warnings.
+opts = { warn: false, unsafe: false }
+printWarn = (line) -> process.stderr.write 'warning: ' + line + '\n' if opts.warn
 
 # Convert a pointer aligned according to `lalign` to one aligned to `ralign`.
 normalizePtr = (ptr, lalign, ralign) ->
@@ -85,19 +113,28 @@ normalizePtr = (ptr, lalign, ralign) ->
 
 # Generate an offset expression from `base`. The `base` is normalized
 # according to the type of data (and the view needed) found at `offset`.
-offsetExpr = (base, baseTy, offset, offsetTy) ->
+offsetExpr = (op, base, baseTy, offset, offsetTy) ->
   balign = baseTy.view.BYTES_PER_ELEMENT
   oalign = offsetTy.view.BYTES_PER_ELEMENT
   normalized = normalizePtr base, balign, oalign
   if offset isnt 0
     # Offsets are always in bytes, so compute the right offset now.
-    new Op '+', normalized, new Value new Literal offset / oalign
+    new Op op, normalized, new Value new Literal offset / oalign
   else
     normalized
 
-# Calls `offsetExpr` with the stack pointer.
+# Calls `offsetExpr` with the stack pointer. Gets a stack local.
 stackOffsetExpr = (o, offset, offsetTy) ->
-  offsetExpr SP, i32ty, offset, offsetTy
+  offsetExpr '+', o.SP, i32ty, offset, offsetTy
+
+# Calls `offsetExpr` with the frame pointer. Gets an incoming argument.
+frameOffsetExpr = (o, offset, offsetTy) ->
+  offsetExpr '-', o.FP, i32ty, offset, offsetTy
+
+# Calls `offsetExpr` with the stack pointer, going into the callee frame. Gets
+# and outgoing argument.
+argOffsetExpr = (o, offset, offsetTy) ->
+  offsetExpr '-', o.SP, i32ty, offset, offsetTy
 
 # Multiply by a size. If the size is a power of 2, use left shift.
 multExpr = (base, size) ->
@@ -107,15 +144,13 @@ multExpr = (base, size) ->
   else
     new Op '*', base, new Value new Literal size
 
-# Transform a function to have the right stack pointer computations upon entry
-# and exit. The safe way is to wrap the entire body of the function in a
+# Transform a function to have the right stack pointer computations upon
+# exit. The safe way is to wrap the entire body of the function in a
 # `try..finally` block to account for possible throws. If the user indicated
 # `gotta-go-fast`, we'll only emit stack pointer computations for explicit
 # returns.
-stackFence = (o, exprs, frameSize, isRoot) ->
-  t = new Assign SP, normalizePtr(SPREAL, U8.BYTES_PER_ELEMENT, I32.BYTES_PER_ELEMENT)
-  exprs.unshift new Assign SP, normalizePtr(SPREAL, U8.BYTES_PER_ELEMENT, I32.BYTES_PER_ELEMENT)
-  exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
+stackFence = (exprs, frameSize, isRoot) ->
+  #exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
   if opts.unsafe
     exprs.push restoreStack if isRoot
@@ -145,7 +180,7 @@ coerceIntegral = (width, signed) -> (expr, ty) ->
 
 # Dereference something in a heap view.
 makeDeref = (o, base, baseTy, offset, offsetTy) ->
-  new Value offsetTy.view, [new Index offsetExpr base, baseTy, offset, offsetTy]
+  new Value offsetTy.view, [new Index offsetExpr '+', base, baseTy, offset, offsetTy]
 
 # Generate an inline memcpy.
 inlineMemcpy = (o, dest, src, ty) ->
@@ -161,7 +196,7 @@ inlineMemcpy = (o, dest, src, ty) ->
   for i in [0...alignmentUnits ty]
     stmts.push new Assign makeDeref(o, destPtr, ty, i * align, ty),
                           makeDeref(o, srcPtr, ty, i * align, ty)
-  stmts.push new Value destPtr
+  stmts.push new Value destPtr if o.value
   new Value new Parens new Block stmts
 
 # Find the last executed node.
@@ -207,7 +242,8 @@ Return::collectReturn = (exprs, o) ->
 
 # A box used to record a local variable's type and other metadata.
 class Binding
-  constructor: (@type) ->
+  constructor: (@type, @param) ->
+    @onStack = no
 
 # This is like *Scope::type*, but it also looks up the scope chain.
 Scope::binding = (name, immediate) ->
@@ -219,12 +255,12 @@ Scope::binding = (name, immediate) ->
 newTypedScope = (p, e, m) ->
   scope = new Scope p, e, m
   scope.variables.length = 0
-  scope.frameSize = 0
+  scope.frameVarsSize = scope.frameArgsSize = 0
   scope
 
 # Declaring a type associates a type with the variable in the current
 # scope.
-declare = (scope, v, ty, variables) ->
+declare = (scope, v, ty, variables, param = no, subpattern = no) ->
   if v instanceof Value
     error v, "cannot type properties" if v.hasProperties()
     v = v.base
@@ -234,10 +270,22 @@ declare = (scope, v, ty, variables) ->
       error v, "cannot type non-destructuring variable `#{v.value}' with destructuring type `#{ty}'"
     name = v.value
     error v, "cannot redeclare variable `#{name}'" if scope.check name
-    bind = new Binding ty
+    bind = new Binding ty, param
     scope.add name, bind
     variables?.push { name, type: ty, binding: bind }
-    putOnStack scope, name if ty instanceof StructType
+    # We don't allow passing structs by value as arguments inside
+    # destructuring types because it's hard to support it efficiently in the
+    # codegen. For primitives, passing by value means first reflecting the
+    # value back into the native JS stack and then *actually* pass by value
+    # via JS. Reflecting the struct back into JS would be expensive.
+    #
+    # Note that we support passing structs by value if they're not nested in a
+    # destructuring pattern by doing something like the C calling convention.
+    if ty instanceof StructType
+      if subpattern
+        error v, "cannot pass structs by value inside patterns"
+      else
+        putOnStack scope, name
     return
   if v instanceof Arr
     els = v.objects
@@ -247,7 +295,7 @@ declare = (scope, v, ty, variables) ->
       if el.this
         error v, "cannot type @-names"
       else
-        declare scope, el.base, ty.elements[i], variables
+        declare scope, el.base, ty.elements[i], variables, param, yes
     return
   if v instanceof Obj
     objs = v.objects
@@ -256,12 +304,12 @@ declare = (scope, v, ty, variables) ->
     for obj in objs
       if obj instanceof Assign
         name = obj.variable.base
-        declare scope, obj.value, ty.names[name.value]?.type, variables
+        declare scope, obj.value, ty.names[name.value]?.type, variables, param, yes
       else if obj.this
         error v, "cannot type @-names"
       else
         name = obj.base
-        declare scope, name, ty.names[name.value]?.type, variables
+        declare scope, name, ty.names[name.value]?.type, variables, param, yes
     return
   error v, "trying to type non-typeable"
 
@@ -269,8 +317,13 @@ declare = (scope, v, ty, variables) ->
 putOnStack = (scope, name) ->
   bind = scope.binding name, true
   bind.onStack = true
-  bind.spOffset = alignOffset scope.frameSize, bind.type
-  scope.frameSize = bind.spOffset + bind.type.size
+  ty = bind.type
+  if bind.param and ty instanceof StructType
+    scope.frameArgsSize = alignOffset(scope.frameArgsSize, ty) + ty.size
+    bind.offset = scope.frameArgsSize
+  else
+    bind.offset = alignOffset scope.frameVarsSize, ty
+    scope.frameVarsSize = bind.offset + ty.size
   return
 
 DeclareType::declareType = (scope, o) ->
@@ -280,7 +333,7 @@ DeclareType::declareType = (scope, o) ->
 Param::declareType = (scope, o) ->
   # Lint just in case the user manually declared the parameter types and
   # thus the types were not linted before this point.
-  declare scope, @name, @type?.lint(o.types), (@variables = [])
+  declare scope, @name, @type?.lint(o.types), (@variables = []), yes
   scope
 
 Op::putOnStack = (scope, o) ->
@@ -300,6 +353,12 @@ TypeAssign::collectType = (types) ->
 alignOffset = (offset, ty) ->
   size = ty.view.BYTES_PER_ELEMENT
   (((offset - 1) / size + 1) | 0) * size
+
+# Align a frame. Frames should always be aligned to the largest view we have
+# so that we can get access to the callee frame regardless of struct view
+# size.
+alignFrame = (scope) ->
+  alignOffset(scope.frameVarsSize, f64ty) + alignOffset(scope.frameArgsSize, f64ty)
 
 # Number of units in alignment size.
 alignmentUnits = (ty) -> ty.size / ty.view.BYTES_PER_ELEMENT
@@ -524,7 +583,7 @@ Base::typeTransformNode = (o) ->
   this
 
 Literal::typeTransformNode = (o) ->
-  if o.isValue
+  if o.value
     # Only literals that are values should get types. We don't want to
     # transform properties. Simple identifiers and integer literals may be
     # typed.
@@ -537,10 +596,14 @@ Literal::typeTransformNode = (o) ->
     else if @isAssignable() and bind = o.scope.binding val
       ty = bind.type
       if bind.onStack
-        offset = stackOffsetExpr o, bind.spOffset, ty
         unless o.scope.check val, true
           error this, "cannot close over non-local on-stack variable `#{name}'"
-        if ty instanceof StructType
+        isStruct = ty instanceof StructType
+        offset = if bind.param and isStruct
+          frameOffsetExpr o, bind.offset, ty
+        else
+          stackOffsetExpr o, bind.offset, ty
+        if isStruct
           cast offset, ty
         else
           cast new Value(ty.view, [new Index offset]), ty
@@ -582,7 +645,7 @@ Value::cacheTransformReference = (ty) ->
 # only happen on property accesses of object and array literals where the
 # constituents are typed.
 Value::typeTransformNode = (o) ->
-  o.isValue = yes
+  o.value = yes
   return this unless vty = (v = @base.typeTransform o).type
   cumulativeOffset = 0
   for prop, i in @properties
@@ -611,7 +674,7 @@ Value::typeTransformNode = (o) ->
         return this
       v = new Value v, [prop]
   if cumulativeOffset isnt 0
-    v = offsetExpr v, vty, cumulativeOffset, fty
+    v = offsetExpr '+', v, vty, cumulativeOffset, fty
   cast new Value(v), vty
 
 # Applications may be typed if the function is typed and the parameter types
@@ -626,12 +689,19 @@ Call::typeTransformNode = (o) ->
     error this, "calling a non-function type `#{fty}'"
   types = o.types
   paramTys = fty.params
+  calleeFrameOffset = 0
   for pty, i in fty.params
     # If fewer arguments than there are parameters were passed, this will be
     # `undefined` and interpreted as the type `any`.
     aty = (args[i] = args[i]?.typeTransform o)?.type
     if pty and not unify types, pty, aty, true
       error this, "incompatible types: passing arg `#{tystr(aty)}' to param `#{tystr(pty)}'"
+    # If we're passing structs by value, we need to copy them to the callee's
+    # stack.
+    if pty instanceof StructType
+      calleeFrameOffset = alignOffset(calleeFrameOffset, pty) + pty.size
+      dest = argOffsetExpr o, calleeFrameOffset, pty
+      args[i] = inlineMemcpy (extend { value: yes }, o), dest, args[i], pty
   # If all the arguments checked, the call gets the return type.
   cast this, fty.ret
 
@@ -779,23 +849,31 @@ Code::typeTransformNode = (o) ->
 
   # Hoist all the **DeclareType**s to the top and process them.
   o.scope = @body.foldChildren @body.foldChildren(scope, 'declareType', o), 'putOnStack', o
+  o.SP = SP()
+  o.FP = FP()
 
   # Convert the last expression to an explicit return.
   exprs = @body.expressions
   [implicitReturn, i] = lastNonCommentOrDecl exprs
   exprs[i] = new Return implicitReturn unless implicitReturn.jumps()
 
-  # Copy parameters that are passed by value and live on the stack.
-  if frameSize = o.scope.frameSize
+  # Copy parameters that are passed by value and live on the stack. Always
+  # align the framesize by 8 bytes so that we can always get access to the
+  # callee frame regardless of struct view size.
+  if frameSize = alignFrame o.scope
     for param in @params
-      for arg in param.variables when arg.binding.onStack
+      for arg in param.variables when arg.binding.onStack and
+                                      arg.binding.type not instanceof StructType
         plh = new Value new Literal arg.name
         # The cast is to prevent transforming the right-hand side to a stack
         # dereference.
         prh = cast new Value(new Literal arg.name), arg.binding.type
         exprs.unshift new Assign plh, prh
     # Do the stack fence.
-    stackFence o, exprs, frameSize if frameSize
+    stackFence exprs, frameSize
+    # Fix up the FP and SP.
+    o.FP.fixup o, frameSize
+    o.SP.fixup frameSize
 
   body = @body.typeTransform o
   body = body.expr if body instanceof Cast
@@ -929,7 +1007,7 @@ Parens::typeTransformNode = (o) ->
 
 # A block gets the type of its tail expression.
 Block::typeTransformNode = (o) ->
-  return super o unless o.isValue
+  return super o unless o.value
   for expr, i in exprs = @expressions
     exprs[i] = expr.typeTransform o
     if i is exprs.length - 1
@@ -940,7 +1018,7 @@ Block::typeTransformNode = (o) ->
 
 # A switch gets the unified type of all its cases.
 Switch::computeNodeType = (o) ->
-  return super o unless o.isValue
+  return super o unless o.value
   @subject = @subject.typeTransform o
   types = o.types
   caseTys = []
@@ -971,7 +1049,7 @@ Switch::computeNodeType = (o) ->
 
 # An if gets the unified type of both of its branches.
 If::typeTransformNode = (o) ->
-  return super o unless o.isValue
+  return super o unless o.value
   @condition = @condition.typeTransform o
   thenTy = (@body = @body?.typeTransform o)?.type
   elseTy = (@elseBody = @elseBody?.typeTransform o)?.type
@@ -1056,12 +1134,13 @@ exports.analyzeTypes = (root, o = {}) ->
   o = { types: types }
   scope = newTypedScope null, root, null
   o.scope = root.foldChildren root.foldChildren(scope, 'declareType', o), 'putOnStack', o
+  o.SP = SP()
 
   # Do the stack fence for the module.
   exprs = root.expressions
-  if frameSize = o.scope.frameSize
-    o.frameSize = frameSize
-    stackFence o, exprs, frameSize, yes
+  if frameSize = alignFrame o.scope
+    stackFence exprs, frameSize, yes
+    o.SP.fixup frameSize
 
   # Do the actual transform
   root.typeTransform o
@@ -1075,6 +1154,6 @@ exports.analyzeTypes = (root, o = {}) ->
   root.transformRoot = (o) ->
     # Require the heap. This has to be done using `o.scope.assign`, to make sure
     # that it comes before the cached views.
-    o.scope.assign HEAP.base.value, "require('heap/heap')"
+    o.scope.assign HEAP.compile(o), "require('heap/heap')"
 
   root
