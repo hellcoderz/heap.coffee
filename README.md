@@ -197,9 +197,9 @@ y :: int
 { x, y } = { x: 0, y: 1 }
 ```
 
-Note, however, that property accesses are always untyped. Only in these
-destructuring assignments where we can statically figure out the value of a
-field that we assign a type to that field during the destructuring.
+Note, however, that property accesses in general are untyped. Only statically
+determinable objects (literals) and statically determinable properties (dot
+notation or a constant index) are typed.
 
 This is particularly helpful for typing parameters:
 
@@ -219,3 +219,7 @@ i :: int
 i = n  # error: incompatible types `int' and `*node'
 i = {} # error: cannot assign untyped to typed
 ```
+
+# Caveats
+
+Don't pass structs by value at the moment. It's unsound.
