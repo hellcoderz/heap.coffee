@@ -71,7 +71,7 @@ SP      = ->
     scope = o.scope
     @value = scope.freeVariable @value
     spreal = normalizePtr @SPREAL, U8.BYTES_PER_ELEMENT, I32.BYTES_PER_ELEMENT
-    scope.assign name, spreal.compile o
+    scope.assign @value, spreal.compile o
     delete @compileNode
     @value
   sp
@@ -150,7 +150,6 @@ multExpr = (base, size) ->
 # `gotta-go-fast`, we'll only emit stack pointer computations for explicit
 # returns.
 stackFence = (exprs, frameSize, isRoot) ->
-  #exprs.unshift new Assign SPREAL, new Value(new Literal frameSize), '-='
   restoreStack = new Assign SPREAL, new Value(new Literal frameSize), '+='
   if opts.unsafe
     exprs.push restoreStack if isRoot
@@ -663,8 +662,8 @@ Value::typeTransformNode = (o) ->
         cumulativeOffset += field.offset
       else
         v = makeDeref o, v, vty, field.offset + cumulativeOffset, fty
-        vty = fty
         cumulativeOffset = 0
+      vty = fty
     else if vty instanceof TypeObj
       unless vty = vty.names[fieldName]?.type
         return this
@@ -702,6 +701,8 @@ Call::typeTransformNode = (o) ->
       calleeFrameOffset = alignOffset(calleeFrameOffset, pty) + pty.size
       dest = argOffsetExpr o, calleeFrameOffset, pty
       args[i] = inlineMemcpy (extend { value: yes }, o), dest, args[i], pty
+    else
+      args[i] = cast args[i], pty
   # If all the arguments checked, the call gets the return type.
   cast this, fty.ret
 
@@ -794,9 +795,9 @@ Assign::typeTransformNode = (o) ->
     # Transform destructuring if we're doing some kind of typed thing.
     ref = new FreshLiteral 'ref', lty
     assigns = [new Assign new Value(ref), value]
-    pattern = variable.expr
-    isObject = pattern.isObject()
-    for obj, i in pattern.base.objects
+    pattern = variable.unwrapCast()
+    isObject = pattern instanceof Obj
+    for obj, i in pattern.objects
       idx = i
       if isObject
         if obj instanceof Assign
@@ -831,10 +832,15 @@ Assign::typeTransformNode = (o) ->
 # A function may be typed if its parameters are typed and the types of all its
 # return expressions unify.
 Code::typeTransformNode = (o) ->
+  # Convert the last expression to an explicit return.
+  exprs = @body.expressions
+  [implicitReturn, i] = lastNonCommentOrDecl exprs
+  exprs[i] = new Return implicitReturn unless implicitReturn.jumps()
+
   # If the declared return type is an arrow type, recur on all return
   # positions and propagate.
-  if rty = @returnType instanceof ArrowType
-    for rexpr in returnExpressions @body when rexpr instanceof Code
+  if (rty = @returnType) instanceof ArrowType
+    for { expression: rexpr } in collectReturns @body when rexpr instanceof Code
       rexpr.paramTypes ?= rty.params
       rexpr.returnType ?= rty.ret
   scope = newTypedScope o.scope, @body, this
@@ -851,11 +857,6 @@ Code::typeTransformNode = (o) ->
   o.scope = @body.foldChildren @body.foldChildren(scope, 'declareType', o), 'putOnStack', o
   o.SP = SP()
   o.FP = FP()
-
-  # Convert the last expression to an explicit return.
-  exprs = @body.expressions
-  [implicitReturn, i] = lastNonCommentOrDecl exprs
-  exprs[i] = new Return implicitReturn unless implicitReturn.jumps()
 
   # Copy parameters that are passed by value and live on the stack. Always
   # align the framesize by 8 bytes so that we can always get access to the
@@ -1098,7 +1099,7 @@ exports.analyzeTypes = (root, o = {}) ->
   root.traverseChildren yes, (node) ->
     if (node instanceof DeclareType) or (node instanceof TypeAssign) or
        (node instanceof Op and node.isUnary() and
-        (node.operator is '&' or node.operator is '*')) or
+        ((op = node.operator) and op is '&' or op is '*' or op is 'sizeof')) or
        (node instanceof Code and node.paramTypes)
       usesTypes = yes
       return no
@@ -1147,7 +1148,10 @@ exports.analyzeTypes = (root, o = {}) ->
 
   # Bring in `malloc` if this module needs it.
   if Scope.root.needsMalloc
-    obj = new Value new Obj [MALLOC, FREE]
+    obj = new Value new Obj [new Assign(new Value(new Literal 'malloc'),
+                                        MALLOC, 'object'),
+                             new Assign(new Value(new Literal 'free'),
+                                        FREE, 'object')]
     exprs.unshift new Assign obj, requireExpr 'heap/malloc'
 
   # Add a transform hook that requires the heap module.

@@ -125,7 +125,7 @@ class exports.Rewriter
          tokens[i+1]?[0] is 'IDENTIFIER' and tokens[i+2]?[0] is '='
         token[0] = 'TYPE'
       else if token[0] is 'PARAM_START' and
-         tokens[--i][0] is 'IS_TYPE' and tokens[--i][0] is ')'
+         tokens[--i]?[0] is 'IS_TYPE' and tokens[--i]?[0] is ')'
         # Logic copied from Lexer::tagParameters.
         tokens[i][0] = 'PARAM_END'
         stack = []

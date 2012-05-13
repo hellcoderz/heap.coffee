@@ -478,7 +478,7 @@ exports.Cast = class Cast extends Base
   compile: (o, lvl) ->
     type = @type
     expr = @expr
-    if expr.type and type.coerce?
+    if expr.type and type?.coerce?
       @expr = type.coerce expr, expr.type
     @expr.compile o, lvl
 

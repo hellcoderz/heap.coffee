@@ -1,19 +1,3 @@
-# Formatting
-# ----------
-
-# TODO: maybe this file should be split up into their respective sections:
-#   operators -> operators
-#   array literals -> array literals
-#   string literals -> string literals
-#   function invocations -> function invocations
-
-# * Line Continuation
-#   * Property Accesss
-#   * Operators
-#   * Array Literals
-#   * Function Invocations
-#   * String Literals
-
 doesNotThrow -> CoffeeScript.compile "a = then b"
 
 test "multiple semicolon-separated statements in parentheticals", ->
@@ -143,4 +127,4 @@ test "#1299: Disallow token misnesting", ->
     '''
     ok no
   catch e
-    eq 'unmatched ] on line 2', e.message
+    eq 'In typein, unmatched ] on line 2', e.message

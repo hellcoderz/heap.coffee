@@ -85,7 +85,8 @@ exports.Lexer = class Lexer
     # with structs to work right.
     forcedIdentifier = colon or
       (prev = last @tokens) and (prev[0] in ['.', '?.'] or
-      not prev.spaced and prev[0] in ['@', '::'])
+      not prev.spaced and prev[0] is '@' or
+      not (prev.spaced and last(@tokens, 1)?.spaced) and prev[0] is '::')
     tag = 'IDENTIFIER'
 
     if not forcedIdentifier and (id in JS_KEYWORDS or id in COFFEE_KEYWORDS)

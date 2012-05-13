@@ -2,6 +2,23 @@
 # they appear in K&R. Some details had to be changed due to not having static
 # globals. This is implicitly `require`d in every file that uses new and
 # delete. The programmer should never need to manually `require` it.
+#
+#   +---------------+ -
+# 0 | Heap  Pointer |
+# 1 | Stack Pointer |
+#   +---------------+ <- Heap Pointer
+#   |               |
+#   |               | |
+#   |     HEAP      | | Malloc Region
+#   |               | v
+#   |               |
+#   +---------------+
+#   |               |
+#   |               | ^
+#   |     STACK     | |
+#   |               | |
+#   |               |
+#   +---------------+ <- Stack Pointer
 
 type header = struct
   ptr  :: *header
@@ -45,6 +62,7 @@ NALLOC = 1024
 
 morecore :: (uint) -> *header
 morecore = (nu) ->
+  _U8 = _HEAP.U8
   nu = NALLOC if nu < NALLOC
   bytesNeeded = nu * sizeof header
   return null if _U32[0] + bytesNeeded >= _U8.length
