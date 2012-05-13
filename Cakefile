@@ -77,6 +77,36 @@ task 'build:heap', 'build the heap runtime', build = (cb) ->
   files = ('src/heap/' + file for file in files when file.match(/\.coffee$/))
   run ['-c', '-o', 'lib/heap'].concat(files), cb
 
+task 'build:browserheap', 'rebuild the merged script for inclusion in the browser', ->
+  code = ''
+  for name in ['heap', 'malloc']
+    code += """
+      require['heap/#{name}'] = new function() {
+        var exports = this;
+        #{fs.readFileSync "lib/heap/#{name}.js"}
+      };
+    """
+  code = """
+    (function(root) {
+      var Heap = new function() {
+        function require(path){ return require[path]; }
+        #{code}
+        this.heap = require['heap/heap']
+        this.malloc = require['heap/malloc']
+      };
+
+      if (typeof define === 'function' && define.amd) {
+        define(function() { return Heap; });
+      } else {
+        root.Heap = Heap;
+      }
+    }(this));
+  """
+  unless process.env.MINIFY is 'false'
+    {parser, uglify} = require 'uglify-js'
+    code = uglify.gen_code uglify.ast_squeeze uglify.ast_mangle parser.parse code
+  fs.writeFileSync 'extras/heap.js', code
+
 
 task 'build:full', 'rebuild the source twice, and run the tests', ->
   build ->
@@ -102,7 +132,7 @@ task 'build:ultraviolet', 'build and install the Ultraviolet syntax highlighter'
 
 task 'build:browser', 'rebuild the merged script for inclusion in the browser', ->
   code = ''
-  for name in ['helpers', 'rewriter', 'lexer', 'parser', 'scope', 'nodes', 'coffee-script', 'browser']
+  for name in ['helpers', 'rewriter', 'lexer', 'parser', 'scope', 'nodes', 'type', 'coffee-script', 'browser']
     code += """
       require['./#{name}'] = new function() {
         var exports = this;
