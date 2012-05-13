@@ -1,0 +1,398 @@
+<html>
+<head>
+  <title>heap.coffee: Low-Level CoffeeScript</title>
+  <link rel="stylesheet" type="text/css" href="screen.css" />
+  <link rel="stylesheet" type="text/css" href="lib/cm/lib/codemirror.css">
+</head>
+
+<script src="lib/cm/lib/codemirror.js"></script>
+<script src="lib/cm/mode/coffeescript/coffeescript.js"></script>
+<script src="lib/jquery-1.7.2.min.js"></script>
+
+<script src="lib/coffee-script.js"></script>
+<script src="lib/heap.js"></script>
+
+<body>
+  <a href="https://github.com/syg/heap.coffee"><img style="position: absolute; top: 0; right: 0; border: 0;" src="images/fork.png" alt="Fork me on GitHub"></a>
+  <a href="http://mozilla.org"><img width="118" height="68" style="position: absolute; top: 0; left: 50; border: 0;" src="images/mozilla.png" alt="Mozilla"></a>
+  <br>
+  <div class="container">
+    <h1>heap.coffee</h1>
+    <p><b>heap.coffee</b> is a dialect
+      of <a href="http://coffeescript.org">CoffeeScript</a> that offers a
+      C-like type system with manual memory management.  It compiles to
+      JavaScript and lets you write memory-efficient and GC pause-free code
+      less painfully.  heap.coffee, like its
+      relative <a href="http://mbebenita.github.com/Mvm/">*JS</a>, is early
+      research prototype work, so don't expect anything rock solid just yet.
+
+      The research goal here is to explore low-level statically typed features
+      in a high-level dynamically typed language.</p>
+    <p>This is an interactive tutorial, code is compiled as you type.  To
+      execute a piece of code press <tt>Ctrl-R</tt> or <tt>Cmd-Enter</tt>.</p>
+
+<h4>Type Declarations and Synonyms</h4>
+
+<p>Type declarations are done using <tt> :: </tt>. To disambiguate the
+prototype operator <tt>::</tt>, the "is-type" operator must be spaced on
+either side.</p>
+
+<p>Local variables and destructuring left-hand sides may be typed. Though both
+sides of a destructuring type declaration must match up. That is, you cannot
+declare a plain variable to be of a destructuring type.</p>
+<p>It is an error to redeclare of the type of a variable.</p>
+<p>Types may be aliased, but only at the toplevel.</p>
+
+<pre class="example">
+type size_t = int
+j = 42
+i :: int
+i = j as size_t   # Assigning from untyped requires cast.
+i = i + 4         # Arithmetic expressions have the Java-
+                  # Scriptnumber type `num', which is
+                  # effectively adouble. An implicit
+                  # conversion happens.
+
+{n} :: {n: int}   # Destructuring is okay as long as both
+                  # sides agree.
+{n} = {n: i}
+
+f :: (int) -> int # Function types are composed using ->.
+f = (x) -> x</pre>
+
+<h4>Data Types and Arithmetic</h4>
+
+<p>Like *JS, heap.coffee has 6 integral
+types: <tt>i32</tt>, <tt>u32</tt>, <tt>i16</tt>, <tt>u16</tt>, <tt>i8</tt>,
+and <tt>u8</tt>, which behave as they do in C. Additionally there
+is <tt>double</tt>, the JavaScript number type, and <tt>any</tt> which are
+used to interoperate with the JavaScript type system.  Arithmetic operations
+usually produce the <tt>double</tt> type even if their operands are integral
+types due to possible overflow.  heap.coffee emits the appropriate coercions
+for assignments and cast operations.</p>
+<p>We also have the aliases <tt>int</tt> = <tt>i32</tt>, <tt>uint</tt>
+= <tt>u32</tt>, <tt>short</tt> = <tt>i16</tt>, <tt>byte</tt>
+= <tt>u8</tt>, and <tt>num</tt> = <tt>double</tt>.</p>
+
+<pre class="example">
+sizeof i8
+sizeof u8
+sizeof i16
+sizeof u16
+sizeof i32
+sizeof u32
+sizeof double
+
+# Arithmetic follows JavaScript semantics. Coercions
+# happen during assignment.
+
+x, y :: int
+x = 3
+y = 2
+
+x / y        # Not an integer.
+x += x / y   # Is an integer.</pre>
+
+<p>heap.coffee allows you to define struct types, which is really the main
+achievement of all these types.</p>
+
+<pre class="example">
+type point = struct
+  x :: int
+  y :: int
+  z :: int
+
+type line = struct
+  start :: point
+  end   :: point
+
+type box = struct
+  left   :: line
+  top    :: line
+  right  :: line
+  bottom :: line
+
+# Stack allocate a box and a take a pointer to its
+# top line.
+b :: box
+p :: *line
+p = &b.top
+
+# Dot notation is overloaded to also work with struct
+# pointers.
+p.start.x = 42
+print p.start.x</pre>
+
+<h4>Functions</h4>
+<p>Since all functions in CoffeeScript are lambdas, the type of a function
+value is the unified type of all its return expressions. However, the
+parameter types must be explicitly declared. To do so there is both an
+explicit notation and a convenience notation.</p>
+
+<pre class="example">
+# Explicit notation for typing parameters.
+#
+# What happens here is that f is assigned
+# the type (int) -> int, and that the right-
+# hand side expression of the assignment
+# computes the type (int) -> int, and then
+# the assignment tries to reconcile the two.
+# Since they are actually the same type,
+# everything works out.
+f :: (int) -> int
+f = (x) :: (int) -> x
+
+# The convenience notation only works when
+# the right hand side of the variable
+# being assigned to is a *syntactic* function.
+# It will then automatically propagate the
+# parameter type declarations to the right-
+# hand side of the assignment.
+g :: (int) -> int
+g = (x) -> x
+
+# Higher-order is okay.
+add :: (int) -> (int) -> int
+add = (x) -> (y) -> x + y</pre>
+
+<h4>Objects and Memory</h4>
+
+<p>heap.coffee allows you to use manual memory management in addition to using
+the managed runtime of JavaScript objects. The reason for this is simple:
+performance. Even though JavaScript's managed runtime is getting faster
+everyday, garbage collection still takes a toll on performance, especially
+pauses.</p>
+
+<p>Moreover, even something like a linked list cannot be declared in
+JavaScript without the extra information of JavaScript objects. heap.coffee
+allows you to metaphorically drop below that object model and back into
+something C-like, but now instead of receiving SIGSEGV and crashing, at worst
+the compiled JavaScript will just be buggy.</p>
+
+<pre class="example">
+type node = struct
+  val  :: int
+  next :: *node
+
+head, tail :: *node
+# new compiles to malloc when the argument is a
+# type. Similarly, delete compiles to free.
+head = new node
+tail = head
+
+add :: (int) -> *node
+add = (val) ->
+  next :: *node
+  next = new node
+  next.val = val
+  tail = tail.next = next
+  next
+
+add 1
+add 2
+add 3
+
+p :: *node
+p = head.next
+while p
+  # The cast here is because the typechecker
+  # will complain that one of the operands of
+  # pointer arithmetic is not an integer.
+  print "node at address: " + (p as any) +
+        " has value: " + p.val
+  p = p.next</pre>
+
+<p><tt>malloc</tt> and <tt>free</tt> themselves are implemented in heap.coffee:</p>
+
+<pre class="example">
+#   +---------------+ -
+# 0 | Heap  Pointer |
+# 1 | Stack Pointer |
+#   +---------------+ <- Heap Pointer
+#   |               |
+#   |               | |
+#   |     HEAP      | | Malloc Region
+#   |               | v
+#   |               |
+#   +---------------+
+#   |               |
+#   |               | ^
+#   |     STACK     | |
+#   |               | |
+#   |               |
+#   +---------------+ <- Stack Pointer
+
+type header = struct
+  ptr  :: *header
+  size :: uint
+
+freep :: *header
+freep = null
+
+malloc :: (uint) -> *any
+malloc = (nbytes) ->
+  p, prevp :: *header
+  nunits   :: uint
+
+  nunits = (nbytes + sizeof header - 1) / sizeof header + 1
+  unless prevp = freep
+    # Haven't allocated a free list yet, do it now.
+    prevp = freep = _U32[0] as *any
+    _U32[0] += sizeof header
+    freep.ptr  = freep
+    freep.size = 0
+
+  p = prevp.ptr
+  loop
+    if p.size >= nunits
+      if p.size is nunits
+        prevp.ptr = p.ptr
+      else
+        p.size -= nunits
+        p += p.size
+        p.size = nunits
+      freep = prevp
+      return p + 1
+    if p is freep
+      return null unless p = morecore nunits
+    prevp = p
+    p = p.ptr
+  null
+
+NALLOC :: int
+NALLOC = 1024
+
+morecore :: (uint) -> *header
+morecore = (nu) ->
+  _U8 = _HEAP.U8
+  nu = NALLOC if nu < NALLOC
+  bytesNeeded = nu * sizeof header
+  return null if _U32[0] + bytesNeeded >= _U8.length
+  up :: *header
+  up = _U32[0] as *any
+  up.size = nu;
+  _U32[0] += bytesNeeded
+  free up + 1
+  freep
+
+free :: (*any) -> any
+free = (ap) ->
+  bp, p :: *header
+
+  bp = (ap as *header) - 1
+
+  p = freep
+  until (bp > p and bp < p.ptr)
+    if p >= p.ptr and (bp > p or bp < p.ptr)
+      break
+    p = p.ptr
+
+  if (bp + bp.size is p.ptr)
+    bp.size += p.ptr.size
+    bp.ptr = p.ptr.ptr
+  else
+    bp.ptr = p.ptr
+
+  if (p + p.size is bp)
+    p.size += bp.size
+    p.ptr = bp.ptr
+  else
+    p.ptr = bp
+
+  freep = p
+  return
+
+exports.malloc = malloc
+exports.free   = free</pre>
+
+<h4>Acknowledgements</h4>
+<p><a href="https://github.com/kripken/emscripten">Emscripten</a> for the
+inspiration, <a href="http://mbebenita.github.com/Mvm/">*JS</a> for keeping
+each other honest, and <a href="http://codemirror.net/">CodeMirror</a> for the
+code editor.</p>
+</div>
+
+<script>
+var id = 0;
+$('.example').replaceWith(function() {
+  var src = this.innerHTML;
+  var lineCount = src.split("\n").length;
+  return '<table class="example"><tr><td><textarea id="ex:' + id + ':source" class="hcCode" rows="' + lineCount + '" spellcheck="false">' + src + '</textarea></td><td valign="top"><pre id="ex:' + id++ + ':result" class="hcResult"></pre></td></tr></table>'
+  // <div class="minibutton ok run" title="Ctrl-Enter">Run</div>
+});
+
+var lastMarker;
+function compileExample(id) {
+  if (lastMarker) {
+    this.clearMarker(lastMarker);
+  }
+  var number = id.split(":")[1];
+  var result = document.getElementById("ex:" + number + ":result");
+  try {
+    result.innerHTML = CoffeeScript.compile(this.getValue(), { bare: true, unsafe: true });
+  } catch (x) {
+    result.innerHTML = x.message;
+    if (x.lineno !== undefined) {
+      lastMarker = this.setMarker(x.lineno - 1, "<span style=\"color: #900\">&#x2794;</span> %N%");
+    }
+  }
+}
+
+function require(path) {
+  if (path === "heap/heap") {
+    return Heap.heap;
+  } else if (path == "heap/malloc") {
+    return Heap.malloc;
+  }
+}
+
+function executeExample(id) {
+  var number = id.split(":")[1];
+  var result = document.getElementById("ex:" + number + ":result");
+  try {
+    result.innerHTML = "";
+
+    print = function (x) {
+      result.innerHTML += x + "\n";
+    };
+
+    start = new Date();
+    code = CoffeeScript.compile(this.getValue(), { unsafe: true });
+    result.innerHTML += "Compiler: " + (new Date() - start) + " ms\n";
+    result.innerHTML += "-----------------------------------------------------\n";
+
+    start = new Date();
+    new Function(code)();
+
+    result.innerHTML += "-----------------------------------------------------\n";
+    result.innerHTML += "Executed in : " + (new Date() - start) + " ms.";
+
+  } catch (x) {
+    result.innerHTML = x.message;
+  }
+}
+
+$('.hcCode').each(function() {
+  var id = this.id;
+  var cm = CodeMirror.fromTextArea(this, {
+    tabSize: 2,
+    lineNumbers: true,
+    gutter: true,
+    onChange: function () {
+      compileExample.call(cm, id);
+    },
+    extraKeys: {
+      "Ctrl-R": function () {
+        executeExample.call(cm, id);
+      },
+      "Cmd-Enter": function () {
+        executeExample.call(cm, id);
+      }
+    }
+  });
+  compileExample.call(cm, id);
+});
+
+</script>
+</body>
+</html>
