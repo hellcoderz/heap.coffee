@@ -219,7 +219,3 @@ i :: int
 i = n  # error: incompatible types `int' and `*node'
 i = {} # error: cannot assign untyped to typed
 ```
-
-# Caveats
-
-Don't pass structs by value at the moment. It's unsound.
